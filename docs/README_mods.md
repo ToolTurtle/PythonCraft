@@ -47,3 +47,23 @@ It behaves like the creature it is made from. `pc.moblist()` lists them; `w.spaw
 Put your mod file in the `mods/` folder (a mod is a program without the `runplot` line). PythonCraft loads it at start.
 Saves remember modded blocks by name: if the mod is missing later, those blocks are skipped with a note.
 See `examples/mod_example/mod_demo.py`.
+
+## Painting your own pictures
+`python3 painter.py snad.png --like sand` opens a small painter on a copy of the sand block's picture (or `paint snad.png --like sand` at
+the live-coding prompt, or `pc.paint('snad.png', like='sand')`). `--skin golem` starts from a creature's skin; `--size 32` makes a bigger
+blank picture. Left button paints, right button picks a colour; P pencil, E eraser, F fill, L lighter, D darker, M mirror, T tiles
+(shows how the block looks repeated, to catch edges that do not match), Ctrl+Z undo, Ctrl+S save. Then use the file: `m.addblock('snad', 'snad.png')`.
+
+## Saving a mod as one file: .pcmod
+```python
+m.save('plum.pcmod')                  # your blocks, wood, items, recipes and creatures, with their pictures and patterns
+pc.loadmod('plum.pcmod')              # add it back (in any program), or put the file in the mods/ folder
+m.submit('Sam', note='my first mod')  # hand it in: submissions/mods/Sam/plum.pcmod
+```
+Creatures made with `m.mob(...)` (or `pc.mob(...)`, which joins the latest mod) are saved too.
+
+A `.pcmod` holds **data only**: names, settings, pictures and patterns. Opening one never runs any code, so it is safe to open a
+student's mod, and a broken or hostile file is turned away with a message (wrong files inside, too big, steps that do not exist...).
+
+Teacher tools: `python3 modtool.py info plum.pcmod` (what it adds), `check` (does everything in it load), `install` (copy into `mods/`),
+`review` (list what students handed in).

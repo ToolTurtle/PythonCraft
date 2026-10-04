@@ -141,7 +141,11 @@ Every creature is `pc.<name>` (`pc.zombie`, `pc.golem`, `pc.vine_golem`). Helper
 | `pc.at_night()` | in the dark |
 | `pc.anywhere()` | now and then, anywhere |
 
-In the full game, put the mod file in `mods/` and it loads at start. More: [README_mods.md](README_mods.md), [README_livecode.md](README_livecode.md).
+**Pictures and files**
+- `paint snad.png --like sand` (prompt) · `pc.paint('snad.png', like='sand')` · `python3 painter.py snad.png` opens the painter
+- `m.save('plum.pcmod')` · `pc.loadmod('plum.pcmod')` · `m.submit('Sam')` · teachers: `python3 modtool.py info|check|install|review`
+
+In the full game, put the mod file (`.pcmod` or `.py`) in `mods/` and it loads at start. More: [README_mods.md](README_mods.md), [README_livecode.md](README_livecode.md).
 
 ## Asking an assistant for a build
 

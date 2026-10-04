@@ -385,11 +385,13 @@ class MobBuilder:
         if file is None:
             raise ValueError(f'I cannot find the skin {str(path)!r}. I looked in {candidates[0].parent}.')
         try:
-            width, height = Image.open(file).size
+            with Image.open(file) as picture:
+                width, height = picture.size
         except Exception:
             raise ValueError(f'The skin {str(path)!r} is not a picture file I can read (use a .png).') from None
         if self._base_skin:
-            base_w, base_h = Image.open(SKINS / self._base_skin).size
+            with Image.open(SKINS / self._base_skin) as base_picture:
+                base_w, base_h = base_picture.size
             if (width, height) != (base_w, base_h) and (width % base_w or height * base_w != base_h * width):
                 raise ValueError(f'The skin is {width} x {height} but this creature needs {base_w} x {base_h} (or the same shape, '
                                  f'bigger). Start from a copy: pycraft.export_skin({self.kind.base!r}, "skin.png").')
@@ -798,7 +800,7 @@ class ModFileError(ValueError):
 FORMAT_VERSION = 1
 MAX_FILES, MAX_OPS = 200, 1000
 MAX_PNG, MAX_JSON, MAX_TOTAL, MAX_PIXELS = 2_000_000, 400_000, 30_000_000, 512
-_ZIP_NAME = re.compile(r'files/[A-Za-z0-9_.-]{1,80}\.(png|pcschem)')
+_ZIP_NAME = re.compile(r'files/[A-Za-z0-9_][A-Za-z0-9_.-]{0,79}\.(png|pcschem)')
 _OP_KEYS = {
     'addblock': {'op', 'name', 'faces', 'like', 'props'}, 'addwood': {'op', 'color', 'leaves', 'name', 'sapling'},
     'additem': {'op', 'name', 'texture', 'food', 'saturation', 'stack', 'fuel', 'title'},
@@ -822,7 +824,7 @@ def _clean(value, depth=0, where='mod.json'):
             raise ModFileError(f'{where} has a very long piece of text.')
         return value
     if isinstance(value, list):
-        if len(value) > 300:
+        if len(value) > MAX_OPS:
             raise ModFileError(f'{where} has a very long list.')
         return [_clean(v, depth + 1, where) for v in value]
     if isinstance(value, dict):
