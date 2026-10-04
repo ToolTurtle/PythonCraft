@@ -19,3 +19,6 @@ mods/.cache/
 assets/
 minecraft-assets-*/
 
+
+# class worlds kept by the LAN server
+lanworlds/

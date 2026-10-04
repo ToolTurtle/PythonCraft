@@ -1779,6 +1779,25 @@ def live(plot, script, **options):
     runplot(plot, script=script, **options)
 
 
+def plot_world_data(plot, border=True, dimension='overworld'):
+    """A plot as the game's world: ({game position: block name}, {game position: facing}, where the player starts).
+    (runplot and the classroom server (lan.py host --plot) both use this.)"""
+    px, py, pz = plot._plot
+    modified = {_to_game(x, y, z): b for (x, y, z), b in plot._blocks.items()}      # y = 0 sits on the grass
+    facing = {_to_game(x, y, z): f for (x, y, z), f in plot._facing.items()}
+    if border:
+        border_block = 'nether_bricks' if dimension == 'nether' else 'stone_bricks'
+        for x in range(-1, px + 1):
+            for z in (-1, pz):
+                modified.setdefault((x, _FLOOR, z), border_block)
+        for z in range(-1, pz + 1):
+            for x in (-1, px):
+                modified.setdefault((x, _FLOOR, z), border_block)
+    start = plot._start[0]
+    spawn = _player_feet(*start) if start else (px / 2, _FLOOR + 1.01, -max(3, px // 4))
+    return modified, facing, spawn
+
+
 def runplot(plot, mode='adventure', time=None, border=True, dimension='overworld', peaceful=False, gallery=None,
             name=None, script=None, message=None, allow_building=False, _screenshot=None, _seconds=6, _hook=None):
     """Open the game window and let you walk around your creation. Closing the window ends the program,
@@ -1838,17 +1857,7 @@ def runplot(plot, mode='adventure', time=None, border=True, dimension='overworld
     from game import Game
     from weather import Weather
     px, py, pz = plot._plot
-    modified = {_to_game(x, y, z): b for (x, y, z), b in plot._blocks.items()}      # y = 0 sits on the grass
-    facing = {_to_game(x, y, z): f for (x, y, z), f in plot._facing.items()}
-    if border:
-        border_block = 'nether_bricks' if dimension == 'nether' else 'stone_bricks'
-        for x in range(-1, px + 1):
-            for z in (-1, pz):
-                modified.setdefault((x, _FLOOR, z), border_block)
-        for z in range(-1, pz + 1):
-            for x in (-1, px):
-                modified.setdefault((x, _FLOOR, z), border_block)
-
+    modified, facing, _spawn = plot_world_data(plot, border, dimension)
     folder = Path(tempfile.mkdtemp(prefix='pycraftworld_'))      # a throwaway folder: your saved games are never touched
     spawn = (px / 2, _FLOOR + 3 + 1, -4)
     game = Game(folder, 'pycraftWorld', seed=0, mode={'spectator': 'spectator', 'creative': 'creative'}.get(mode, 'survival'),

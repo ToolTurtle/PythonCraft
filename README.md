@@ -95,6 +95,9 @@ Add your own blocks, wood and creatures with `pc.mod()` and `pc.mob()`: see docs
 ## Command list
 Every command on one page: docs/COMMANDS.md (press / in a live-coding game to type them).
 
+## Playing together
+`python3 lan.py host` starts a classroom server (local network only) and `python3 lan.py join` joins one. Anyone can be the teacher with `/teacher PIN`: see docs/README_lan.md.
+
 ## Tests
 `python3 run_tests.py` runs the checks (add `-v` to see each one; `PYCRAFT_NO_WINDOW=1` skips the ones that open the game).
 They use a throwaway folder: your saves are never touched.
