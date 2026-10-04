@@ -47,6 +47,7 @@ Type Python at the pc> prompt (w is your plot, pc is pycraft). Commands start wi
   :tp X Y Z        move yourself to a place in the plot
   :fly / :walk     fly around (spectator) / walk again
   :blocks WORD     find block names that contain WORD
+  paint FILE.png   open the picture painter (--like BLOCK or --skin CREATURE to start from a copy)
   :help            this list          :quit   close the game
 '''
 
@@ -71,7 +72,7 @@ class Session:
         self.commands = {'undo': self.cmd_undo, 'redo': self.cmd_redo, 'delay': self.cmd_delay, 'clear': self.cmd_clear,
                          'save': self.cmd_save, 'load': self.cmd_load, 'export': self.cmd_export, 'run': self.cmd_run,
                          'history': self.cmd_history, 'tp': self.cmd_tp, 'fly': self.cmd_fly, 'walk': self.cmd_walk,
-                         'blocks': self.cmd_blocks, 'help': self.cmd_help, 'quit': self.cmd_quit, 'exit': self.cmd_quit}
+                         'blocks': self.cmd_blocks, 'paint': self.cmd_paint, 'help': self.cmd_help, 'quit': self.cmd_quit, 'exit': self.cmd_quit}
         for name in dir(plot):                                   # fill(...) works as well as w.fill(...)
             if not name.startswith('_') and name not in self.namespace and callable(getattr(plot, name)):
                 self.namespace[name] = getattr(plot, name)
@@ -263,6 +264,18 @@ class Session:
         if game is not None:
             self.plot._later(lambda: game.player.set_mode(mode))
         print('You are flying (it goes through everything). :walk to come back.' if mode == 'spectator' else 'Walking again.')
+
+    def cmd_paint(self, rest):
+        words = rest.split()
+        if not words:
+            raise ValueError('Say which picture: paint snad.png   (or: paint snad.png --like sand   /   paint golem.png --skin golem)')
+        options = {'like': None, 'skin': None}
+        for flag in ('like', 'skin'):
+            if f'--{flag}' in words:
+                at = words.index(f'--{flag}')
+                options[flag] = words[at + 1] if at + 1 < len(words) else None
+                del words[at:at + 2]
+        print(f'Opening the painter on {self.pycraft.paint(words[0], **options)} (save with Ctrl+S, then use it in your mod).')
 
     def cmd_blocks(self, rest):
         names = [n for n in self.pycraft.BLOCKS if rest.lower() in n]

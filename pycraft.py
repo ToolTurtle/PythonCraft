@@ -2084,6 +2084,13 @@ def anywhere(chance=0.1, limit=4):
     return mods.anywhere(chance, limit)
 
 
+def paint(filename, like=None, skin=None, size=16):
+    """Open the picture painter on a .png for your mod: pc.paint('snad.png', like='sand') starts from a copy of the sand block's
+    picture, pc.paint('golem.png', skin='golem') from a creature's skin. It opens in its own window; save with Ctrl+S."""
+    import painter
+    return painter.open_window(_userpath(filename), like, skin, size)
+
+
 def export_skin(creature, filename):
     """Copy a creature's skin so you can paint your own: pc.export_skin(pc.golem, 'golem.png')."""
     import mods
@@ -2119,4 +2126,4 @@ def __getattr__(name):
 __all__ = ['plot', 'challenge', 'feedback', 'load', 'view', 'Challenge', 'require', 'level', 'solution', 'runplot', 'live', 'wait', 'running', 'adventure', 'spectator', 'Plot', 'Clip',
            'Creature', 'Turtle', 'BLOCKS', 'blocklist', 'blockid', 'moblist', 'noise', 'levels', 'progress',
            'reset_progress', 'challenges', 'makegallery', 'rotate', 'mirror', 'mod', 'mob', 'block_placement', 'near_block',
-           'on_block', 'at_night', 'anywhere', 'export_skin', 'export_texture', 'schematic']
+           'on_block', 'at_night', 'anywhere', 'export_skin', 'export_texture', 'schematic', 'paint']
