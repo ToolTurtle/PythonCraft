@@ -4,10 +4,14 @@
     info = client.connect()          # joins and receives the world; raises LanError with a plain message if it cannot
     for event in client.poll(): ...  # what happened since last time: other players, block changes, chat, teacher orders
 """
+import base64
 import json
+import os
 import queue
 import socket
+import tempfile
 import threading
+from pathlib import Path
 
 import netproto as proto
 from netproto import ProtocolError
@@ -18,9 +22,10 @@ class LanError(Exception):
 
 
 class LanClient:
-    def __init__(self, host, port, code, name, blocks_hash=None):
+    def __init__(self, host, port, code, name, blocks_hash=None, auto_mods=True):
         import blocks
         self.host, self.port, self.code, self.name = host, int(port), code, name
+        self.auto_mods = auto_mods
         self.blocks_hash = blocks_hash or proto.blocks_hash(list(blocks.BLOCKS))
         self.sock = None
         self.events = queue.Queue()
@@ -41,28 +46,86 @@ class LanClient:
             raise LanError(f'Could not reach {self.host}: {error.strerror or error}. Is the server running, and are you on the same network?') from None
         self.sock.settimeout(timeout)
         self.send({'t': 'hello', 'v': proto.VERSION, 'name': self.name, 'code': self.code, 'blocks': self.blocks_hash})
-        info, changes = None, []
+        info, changes, chests, plots = None, [], [], None
+        try:
+            return self._join(info, changes, chests, plots)
+        except LanError:
+            self.close()
+            raise
+
+    def _join(self, info, changes, chests, plots):
         while True:
             message = self._read_one()
             kind = message['t']
             if kind in ('error', 'kick'):
                 self.close()
                 raise LanError(str(message.get('m', 'The server said no.')))
-            if kind == 'welcome':
+            if kind == 'needmods':
+                self._get_mods(message.get('mods', []))               # (the server offers what this computer is missing)
+                self.send({'t': 'hello', 'v': proto.VERSION, 'name': self.name, 'code': self.code, 'blocks': self.blocks_hash})
+            elif kind == 'welcome':
                 info = message
             elif kind == 'world':
                 changes.extend(message.get('c', []))
+            elif kind == 'chests':
+                chests.extend(message.get('c', []))
+            elif kind == 'plots':
+                plots = message
             elif kind == 'ready':
                 break
             elif info is not None and kind in ('say', 'join', 'leave', 'pos', 'blocks', 'chat'):
                 self.events.put(message)                    # (things that happened while the world was arriving)
         if info is None:
             raise LanError('The server did not send a world.')
-        info['changes'] = changes
+        info['changes'], info['chests'], info['plots'] = changes, chests, plots
         self.id, self.name = info['id'], info['name']
         self.sock.settimeout(None)
         threading.Thread(target=self._reader, daemon=True).start()
         return info
+
+    def _get_mods(self, offered):
+        """Download the mods the server has that this computer lacks (.pcmod files hold data only, and each is checked before it is
+        used), load them for this game, and work out what blocks there are now."""
+        import blocks
+        import mods
+        if not self.auto_mods:
+            raise LanError('The host\'s mods are not all installed here: ' + ', '.join(m.get('name', '?') for m in offered)
+                           + '. Install the same .pcmod files (modtool.py install).')
+        if not isinstance(offered, list) or len(offered) > 40:
+            raise LanError('The server offered too many mods.')
+        folder = Path(os.environ.get('PYCRAFT_MODCACHE') or Path(__file__).resolve().parent / 'mods' / '.cache') / 'downloads'
+        folder.mkdir(parents=True, exist_ok=True)
+        for entry in offered:
+            sha, size = str(entry.get('sha', '')), entry.get('size', 0)
+            if not sha.isalnum() or len(sha) > 20 or not isinstance(size, int) or size > mods.MAX_TOTAL:
+                raise LanError('The server offered a mod that does not look right.')
+            path = folder / f'{sha}.pcmod'
+            if not path.exists():
+                self.send({'t': 'getmod', 'sha': sha})
+                chunks, wanted = {}, None
+                while wanted is None or len(chunks) < wanted:
+                    message = self._read_one()
+                    if message['t'] in ('error', 'kick'):
+                        raise LanError(str(message.get('m', 'The server said no.')))
+                    if message['t'] == 'modfile' and message.get('sha') == sha:
+                        wanted = int(message['of'])
+                        if wanted > 2000:
+                            raise LanError('A mod from the server was too big.')
+                        chunks[int(message['i'])] = base64.b64decode(message['data'])
+                temporary = Path(tempfile.mkdtemp()) / 'download.pcmod'
+                temporary.write_bytes(b''.join(chunks[i] for i in range(wanted)))
+                try:
+                    _spec, _files, real = mods.read_pcmod(temporary)            # (data only, and checked)
+                except mods.ModFileError as error:
+                    raise LanError(f'A mod from the server is not good: {error}') from None
+                if real != sha:
+                    raise LanError('A mod from the server did not arrive properly.')
+                path.write_bytes(temporary.read_bytes())
+            try:
+                mods.load_pcmod(path)
+            except mods.ModFileError as error:
+                raise LanError(f'A mod from the server could not be used: {error}') from None
+        self.blocks_hash = proto.blocks_hash(list(blocks.BLOCKS))
 
     def _read_one(self):
         while b'\n' not in self._buffer:
@@ -121,10 +184,25 @@ class LanClient:
         self.send({'t': 'pos', 'x': round(x, 3), 'y': round(y, 3), 'z': round(z, 3), 'yaw': round(yaw, 1), 'pitch': round(pitch, 1),
                    'v': bool(moving)})
 
-    def send_blocks(self, changes):
-        """changes: [(x, y, z, block name or None, facing or None), ...]"""
+    def send_blocks(self, changes, code=False):
+        """changes: [(x, y, z, block name or None, facing or None[, old block, old facing]), ...]. code=True: built by the player's code."""
         for start in range(0, len(changes), proto.MAX_BLOCKS_PER_MESSAGE):
-            self.send({'t': 'blocks', 'c': [list(c) for c in changes[start:start + proto.MAX_BLOCKS_PER_MESSAGE]]})
+            message = {'t': 'blocks', 'c': [list(c) for c in changes[start:start + proto.MAX_BLOCKS_PER_MESSAGE]]}
+            if code:
+                message['code'] = True
+            self.send(message)
+
+    def send_sim(self, changes):
+        """(only the computer that runs the world) blocks that changed by themselves: water, sand, fire, redstone."""
+        for start in range(0, len(changes), proto.MAX_BLOCKS_PER_MESSAGE * 4):
+            self.send({'t': 'sim', 'c': [list(c) for c in changes[start:start + proto.MAX_BLOCKS_PER_MESSAGE * 4]]})
+
+    def send_chest(self, x, y, z, items):
+        self.send({'t': 'chest', 'x': x, 'y': y, 'z': z, 'items': items})
+
+    def send_code(self, text):
+        """What this player typed in the code prompt (so a teacher can see it)."""
+        self.send({'t': 'code', 'm': text})
 
     def chat(self, text):
         self.send({'t': 'chat', 'm': text})

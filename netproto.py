@@ -120,22 +120,56 @@ def number(value, low=-LIMIT, high=LIMIT, integer=False):
     return int(value) if integer else float(value)
 
 
-def block_change(entry, known_blocks):
-    """[x, y, z, name or None, facing or None] -> ((x, y, z), name or None, facing or None), checked."""
-    if not isinstance(entry, (list, tuple)) or len(entry) != 5:
-        raise ProtocolError('a block change is [x, y, z, block, facing]')
-    x, y, z = (number(entry[0], integer=True), number(entry[1], 0, HEIGHT - 1, integer=True), number(entry[2], integer=True))
-    name, facing = entry[3], entry[4]
+def _block_and_facing(name, facing, known_blocks):
     if name is not None and (not isinstance(name, str) or name not in known_blocks):
         raise ProtocolError(f'unknown block {str(name)[:30]!r}')
     if facing is not None and (not isinstance(facing, str) or len(facing) > 12):
         raise ProtocolError('bad facing')
-    return (x, y, z), name, facing
+    return name, facing
+
+
+def block_change(entry, known_blocks):
+    """[x, y, z, name or None, facing or None] (and, if the sender says what was there before, [..., old name, old facing])
+    -> ((x, y, z), name or None, facing or None, (old name, old facing) or None), checked."""
+    if not isinstance(entry, (list, tuple)) or len(entry) not in (5, 7):
+        raise ProtocolError('a block change is [x, y, z, block, facing]')
+    x, y, z = (number(entry[0], integer=True), number(entry[1], 0, HEIGHT - 1, integer=True), number(entry[2], integer=True))
+    name, facing = _block_and_facing(entry[3], entry[4], known_blocks)
+    previous = _block_and_facing(entry[5], entry[6], known_blocks) if len(entry) == 7 else None
+    return (x, y, z), name, facing, previous
+
+
+def chest_items(entries, known_items):
+    """The 27 slots of a chest: each None or [item, count, damage], checked."""
+    if not isinstance(entries, list) or len(entries) != 27:
+        raise ProtocolError('a chest has 27 slots')
+    out = []
+    for entry in entries:
+        if entry is None:
+            out.append(None)
+            continue
+        if not (isinstance(entry, (list, tuple)) and len(entry) == 3) or not isinstance(entry[0], str) or entry[0] not in known_items:
+            raise ProtocolError('bad chest item')
+        out.append([entry[0], number(entry[1], 1, 64, integer=True), number(entry[2], 0, 5000, integer=True)])
+    return out
+
+
+def parse_span(word):
+    """'5m' -> 300 (seconds), '30s', '2h', 'all' -> None (everything), '20' -> ('count', 20). Raises ValueError."""
+    word = str(word).strip().lower()
+    if word == 'all':
+        return None
+    if word.isdigit():
+        return ('count', int(word))
+    match = re.fullmatch(r'(\d+)([smh])', word)
+    if not match:
+        raise ValueError('say how far back: 30s, 5m, 2h, a number of changes like 20, or all')
+    return int(match.group(1)) * {'s': 1, 'm': 60, 'h': 3600}[match.group(2)]
 
 
 def blocks_hash(names):
-    """A short fingerprint of the list of blocks, so two computers can tell they have the same mods."""
-    return hashlib.sha1('\n'.join(names).encode()).hexdigest()[:10]
+    """A short fingerprint of the set of blocks (the order does not matter), so two computers can tell they have the same mods."""
+    return hashlib.sha1('\n'.join(sorted(names)).encode()).hexdigest()[:10]
 
 
 class Bucket:

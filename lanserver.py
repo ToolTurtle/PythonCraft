@@ -3,46 +3,67 @@
     python3 lan.py host                    start a server (see lan.py for the options)
 
 Anyone can be a teacher, wherever they sit: a player types /teacher PIN in the game. The server checks the PIN (kept only as a
-salted hash, with limits on guessing) and then lets that player change game modes, freeze, lock building, mute, kick, teleport and
-make announcements. The server itself is not special: it can be run by one computer while the teacher plays on another.
+salted hash, with limits on guessing) and then lets that player change game modes, freeze, lock building, mute, kick, teleport,
+roll back a player's changes, look after the student plots and make announcements. The server itself is not special: it can be run
+by one computer while the teacher plays on another.
 
 Everything a player sends is checked here (see netproto.py); the server never runs anything a player sends."""
 import asyncio
+import base64
+import collections
 import json
+import re
 import threading
 import time
 from pathlib import Path
 
 import netproto as proto
+from classlayout import GROUND, Layout
 from netproto import Bucket, ProtocolError
 
 TOGGLES = {'oak_door_b', 'oak_door_t', 'lever', 'lever_on', 'stone_button', 'bed', 'oak_trapdoor'}
 DISCOVERY_PORT = proto.DEFAULT_PORT + 1
-HELP_STUDENT = ('/list  who is here   /teacher PIN  become a teacher   /help')
+STUDENT_COMMANDS = {'claim', 'home', 'plots'}
+HISTORY_LIMIT = 20000
+MOD_CHUNK = 24000
+HELP_STUDENT = ('/list  who is here   /teacher PIN  become a teacher   /help\n'
+                '/claim  get a plot   /home  go to your plot   /plots  who has which plot')
 HELP_TEACHER = ('/mode MODE [who|all]  adventure, survival, creative or spectator   /default MODE  for new players\n'
-                '/freeze [who|all]  /unfreeze [who|all]   /lock  /unlock  building for everyone\n'
-                '/mute who  /unmute who   /kick who [why]   /tp who  go to a player   /bring who|all  bring players to you\n'
-                '/say text  announce to everyone   /time day|night|noon|sunrise|sunset   /list   /teacher off')
+                '/freeze [who|all]  /unfreeze [who|all]   /lock  /unlock  building for everyone   /code on|off [who|all]  code building\n'
+                '/mute who|all  /unmute who|all   /chat on|off  all students   /kick who [why]   /tp who  /bring who|all  /goto N\n'
+                '/history [who]  who changed what   /undo who 5m|30s|20|all  put back what they changed   /code who  what they typed\n'
+                '/assign who N  /unassign who|N  /claim   /plots   /say text  announce   /time day|night|noon|sunrise|sunset\n'
+                '/list   /teacher off')
+
+
+class NeedMods(Exception):
+    """The player's mods differ, but the server can offer the .pcmod files they are missing."""
 
 
 class WorldState:
-    """The world as the server knows it: how it starts (a seed or a built world) and every block players changed."""
+    """The world as the server knows it: how it starts (a seed or a built world), every block players changed, the plots."""
 
-    def __init__(self, seed=0, title='Class world', flat_spawn=None, changes=None):
+    def __init__(self, seed=0, title='Class world', flat_spawn=None, changes=None, layout=None, chests=None):
         self.seed, self.title, self.flat_spawn = int(seed), str(title), flat_spawn
         self.changes = dict(changes or {})                # (x, y, z) -> (block name or None, facing or None)
+        self.layout = layout                              # a Layout (plots and border) or None
+        self.chests = dict(chests or {})                  # (x, y, z) -> 27 slots of None or [item, count, damage]
         self.dirty = False
 
     def to_json(self):
         return {'format': 'lanworld', 'seed': self.seed, 'title': self.title, 'flat_spawn': self.flat_spawn,
-                'changes': [[x, y, z, name, facing] for (x, y, z), (name, facing) in self.changes.items()]}
+                'changes': [[x, y, z, name, facing] for (x, y, z), (name, facing) in self.changes.items()],
+                'layout': self.layout.to_json() if self.layout else None,
+                'chests': [[x, y, z, items] for (x, y, z), items in self.chests.items()]}
 
     @classmethod
     def from_json(cls, data):
         changes = {}
         for x, y, z, name, facing in data.get('changes', []):
             changes[(x, y, z)] = (name, facing)
-        return cls(data.get('seed', 0), data.get('title', 'Class world'), data.get('flat_spawn'), changes)
+        layout = Layout.from_json(data['layout']) if data.get('layout') else None
+        chests = {(x, y, z): items for x, y, z, items in data.get('chests', [])}
+        return cls(data.get('seed', 0), data.get('title', 'Class world'), data.get('flat_spawn'), changes, layout, chests)
 
     def save(self, path):
         path = Path(path)
@@ -66,11 +87,14 @@ class Conn:
         self.teacher = False
         self.mode = 'adventure'
         self.frozen = self.muted = False
+        self.can_code = True
         self.pos = None                                   # (x, y, z) as last reported
         self.yaw = self.pitch = 0.0
         self.joined = False
         self.bad = 0                                      # messages that were not allowed
         self.pin_failures, self.pin_locked_until = 0, 0.0
+        self.mod_requests = 0
+        self.code_log = collections.deque(maxlen=20)      # (time, what they typed in the code prompt)
         self.msg_bucket, self.pos_bucket = Bucket(120, 240), Bucket(40, 60)
         self.block_bucket, self.chat_bucket = Bucket(300, 600), Bucket(1.0, 5)
 
@@ -82,7 +106,7 @@ class Conn:
 
 class LanServer:
     def __init__(self, world, pin=None, code=None, host='0.0.0.0', port=0, default_mode='adventure', max_players=40,
-                 save_path=None, known_blocks=None, name='PythonCraft class'):
+                 save_path=None, known_blocks=None, name='PythonCraft class', mods_dir=None, chat_log=None, badwords=()):
         import blocks
         self.world = world
         self.pin = str(pin) if pin else proto.make_pin()
@@ -96,13 +120,21 @@ class LanServer:
         self.default_mode, self.max_players, self.save_path = default_mode, max_players, save_path
         self.known_blocks = set(known_blocks) if known_blocks is not None else set(blocks.BLOCKS)
         self.blocks_hash = proto.blocks_hash(known_blocks if known_blocks is not None else list(blocks.BLOCKS))
+        import items as _items
+        self.known_items = set(_items.ITEMS)
         self.name = name
         self.players = {}                                 # id -> Conn
         self.next_id = 1
         self.building_locked = False
+        self.chat_locked = False
         self.time_ticks = None
         self.auth_failures = []                           # times of wrong PINs (all players together)
         self.auth_locked_until = 0.0
+        self.history = []                                 # what players changed: dicts, oldest first (for /history and /undo)
+        self.authority = None                             # the player whose computer runs water, falling sand... for everybody
+        self.chat_log = Path(chat_log) if chat_log else None
+        self.set_badwords(badwords)
+        self.mods = self._scan_mods(mods_dir)
         self.loop = self.server = self.thread = self._stop = None
         self.log_lines = []
 
@@ -135,11 +167,12 @@ class LanServer:
         self._stop = asyncio.Event()
         self.server = await asyncio.start_server(self._handle, self.host, self.port, limit=proto.MAX_LINE)
         self.port = self.server.sockets[0].getsockname()[1]
-        autosave = asyncio.ensure_future(self._autosave())
+        tasks = [asyncio.ensure_future(self._autosave()), asyncio.ensure_future(self._roster_loop())]
         self._start_discovery()
         ready.set()
         await self._stop.wait()
-        autosave.cancel()
+        for task in tasks:
+            task.cancel()
         if self._udp is not None:
             self.loop.remove_reader(self._udp.fileno())
         for conn in list(self.players.values()):
@@ -164,11 +197,27 @@ class LanServer:
             await asyncio.sleep(30)
             self.save()
 
+    async def _roster_loop(self):
+        while True:
+            await asyncio.sleep(4)
+            self.send_roster()
+
     def log(self, text):
         self.log_lines.append(text)
         del self.log_lines[:-200]
 
-    # ---- finding the server on the network (a broadcast answer: name, port and player count; never the room code) -------------
+    def chatlog(self, text):
+        """One line in the chat log file (if there is one): what was said, who joined, what teachers did."""
+        if self.chat_log is None:
+            return
+        try:
+            self.chat_log.parent.mkdir(parents=True, exist_ok=True)
+            with open(self.chat_log, 'a', encoding='utf-8') as handle:
+                handle.write(f'{time.strftime("%Y-%m-%d %H:%M:%S")} {text}\n')
+        except OSError:
+            pass
+
+    # ---- finding the server on the network (a broadcast answer: name, port and player count; never the room code) ---------------
 
     def _start_discovery(self):
         import socket
@@ -200,6 +249,33 @@ class LanServer:
                 pass
             self._udp = None
 
+    # ---- word filter and mods on offer ------------------------------------------------------------------------------------------------
+
+    def set_badwords(self, words):
+        words = sorted({w.strip().lower() for w in words if w and w.strip() and not w.strip().startswith('#')}, key=len, reverse=True)
+        self._filter = re.compile(r'\b(' + '|'.join(re.escape(w) for w in words) + r')\b', re.IGNORECASE) if words else None
+
+    def filter_text(self, text):
+        """(text with the filtered words starred out, whether anything was filtered)"""
+        if self._filter is None:
+            return text, False
+        out, count = self._filter.subn(lambda m: '*' * len(m.group(0)), text)
+        return out, count > 0
+
+    def _scan_mods(self, mods_dir):
+        """The .pcmod files in the mods folder, checked (they hold data only), that players missing them can download."""
+        found = []
+        if not mods_dir or not Path(mods_dir).is_dir():
+            return found
+        import mods
+        for path in sorted(Path(mods_dir).glob('*.pcmod')):
+            try:
+                spec, _files, sha = mods.read_pcmod(path)
+            except mods.ModFileError:
+                continue
+            found.append({'name': spec['name'], 'sha': sha, 'size': path.stat().st_size, 'path': str(path)})
+        return found
+
     # ---- talking to players -------------------------------------------------------------------------------------------------------
 
     def send(self, conn, message):
@@ -221,14 +297,57 @@ class LanServer:
     def tell(self, conn, text):
         self.send(conn, {'t': 'say', 'm': text})
 
+    def tell_teachers(self, text):
+        for conn in list(self.players.values()):
+            if conn.teacher:
+                self.tell(conn, text)
+
     def locked_for(self, conn):
-        """Can this player not build right now?"""
+        """Can this player not build by hand right now?"""
         if conn.frozen or conn.mode in ('adventure', 'spectator'):
             return True
         return self.building_locked and not conn.teacher
 
     def send_mode(self, conn):
         self.send(conn, {'t': 'mode', 'mode': conn.mode, 'locked': self.locked_for(conn), 'frozen': conn.frozen})
+
+    def plots_message(self):
+        layout = self.world.layout
+        if layout is None:
+            return {'t': 'plots', 'plots': [], 'border': None}
+        return {'t': 'plots', 'plots': [p.to_json() for p in layout.plots], 'border': list(layout.border) if layout.border else None}
+
+    def send_plots(self):
+        self.broadcast(self.plots_message())
+
+    def roster(self):
+        layout, rows = self.world.layout, []
+        for conn in self.players.values():
+            plot = layout.owner_of(conn.name) if layout else None
+            rows.append({'id': conn.id, 'name': conn.name, 'teacher': conn.teacher, 'mode': conn.mode, 'frozen': conn.frozen,
+                         'muted': conn.muted, 'code': conn.can_code, 'plot': plot.id if plot else None,
+                         'last': conn.code_log[-1][1][:60] if conn.code_log else ''})
+        return rows
+
+    def send_roster(self):
+        """The class list for every teacher (it feeds the teacher panel in the game)."""
+        if any(c.teacher for c in self.players.values()):
+            message = {'t': 'roster', 'players': self.roster(), 'locked': self.building_locked, 'chat': not self.chat_locked}
+            for conn in list(self.players.values()):
+                if conn.teacher:
+                    self.send(conn, message)
+
+    def _elect_authority(self):
+        """One player's computer runs water, falling sand, fire and redstone for everybody (the others only watch)."""
+        wanted = min(self.players) if self.players else None
+        if wanted == self.authority:
+            return
+        old = self.players.get(self.authority)
+        self.authority = wanted
+        if old is not None:
+            self.send(old, {'t': 'authority', 'on': False})
+        if wanted is not None:
+            self.send(self.players[wanted], {'t': 'authority', 'on': True})
 
     # ---- a player connecting ---------------------------------------------------------------------------------------------------------
 
@@ -243,17 +362,24 @@ class LanServer:
             if len(self.players) >= self.max_players:
                 self.send(conn, {'t': 'error', 'm': 'The class is full.'})
                 return
-            try:
-                first = await asyncio.wait_for(reader.readline(), 10)
-                hello = proto.decode(first)
-                self._hello(conn, hello)
-            except (asyncio.TimeoutError, ProtocolError, asyncio.LimitOverrunError, ValueError) as error:
-                self.send(conn, {'t': 'error', 'm': str(error) if isinstance(error, ProtocolError) else 'Say hello first.'})
-                return
-            except (ConnectionError, OSError):
-                return
-            if conn.joined is False:
-                return
+            deadline = time.monotonic() + 180
+            while not conn.joined:                         # (hello, and perhaps downloading mods first)
+                try:
+                    line = await asyncio.wait_for(reader.readline(), max(1, min(15, deadline - time.monotonic())))
+                    if time.monotonic() > deadline or not line:
+                        return
+                    message = proto.decode(line)
+                    if message['t'] == 'hello':
+                        self._hello(conn, message)
+                    elif message['t'] == 'getmod':
+                        self._send_mod(conn, message)
+                    else:
+                        raise ProtocolError('Say hello first.')
+                except NeedMods as needed:
+                    self.send(conn, {'t': 'needmods', 'mods': needed.args[0]})
+                except (asyncio.TimeoutError, asyncio.LimitOverrunError, ValueError, ProtocolError) as error:
+                    self.send(conn, {'t': 'error', 'm': str(error) if isinstance(error, ProtocolError) else 'Say hello first.'})
+                    return
             while True:
                 try:
                     line = await reader.readline()
@@ -287,91 +413,209 @@ class LanServer:
                 pass
 
     def _hello(self, conn, hello):
-        if hello.get('t') != 'hello' or hello.get('v') != proto.VERSION:
+        if hello.get('v') != proto.VERSION:
             raise ProtocolError('This game is a different version. Update PythonCraft.')
         if not proto.same_code(hello.get('code', ''), self.code):
             raise ProtocolError('That room code is not right.')
         if hello.get('blocks') != self.blocks_hash:
+            if self.mods:
+                raise NeedMods([{'name': m['name'], 'sha': m['sha'], 'size': m['size']} for m in self.mods])
             raise ProtocolError('Your mods are not the same as the host\'s (different blocks). Install the same .pcmod files.')
         conn.name = proto.clean_name(hello.get('name'), [c.name for c in self.players.values()])
         conn.mode = self.default_mode
         self.players[conn.id] = conn
         conn.joined = True
-        world = self.world
+        world, layout = self.world, self.world.layout
+        spawn = list(layout.spawn) if layout and layout.spawn else None
         self.send(conn, {'t': 'welcome', 'id': conn.id, 'name': conn.name, 'seed': world.seed, 'title': world.title,
-                         'flat_spawn': world.flat_spawn, 'mode': conn.mode, 'locked': self.locked_for(conn),
-                         'time': self.time_ticks, 'server': self.name,
+                         'flat_spawn': world.flat_spawn, 'spawn': spawn, 'mode': conn.mode, 'locked': self.locked_for(conn),
+                         'time': self.time_ticks, 'server': self.name, 'chat': not self.chat_locked,
                          'players': [c.info() for c in self.players.values() if c is not conn],
                          'count': len(world.changes)})
         changes = [[x, y, z, name, facing] for (x, y, z), (name, facing) in world.changes.items()]
         for start in range(0, len(changes), 500):
             self.send(conn, {'t': 'world', 'c': changes[start:start + 500]})
+        if world.chests:
+            self.send(conn, {'t': 'chests', 'c': [[x, y, z, items] for (x, y, z), items in world.chests.items()]})
+        self.send(conn, self.plots_message())
         self.send(conn, {'t': 'ready'})
+        self._elect_authority()
         self.broadcast({'t': 'join', 'p': conn.info()}, skip=conn)
         self.broadcast({'t': 'say', 'm': f'{conn.name} joined.'}, skip=conn)
-        self.tell(conn, 'Welcome! /help shows the commands. A teacher types /teacher PIN.')
+        mine = layout.owner_of(conn.name) if layout else None
+        self.tell(conn, 'Welcome! /help shows the commands. A teacher types /teacher PIN.'
+                  + (f' Your plot is number {mine.id}: /home takes you there.' if mine else
+                     (' Type /claim to get a plot to build in.' if layout and layout.plots else '')))
         self.log(f'{conn.name} joined from {conn.address}')
+        self.chatlog(f'* {conn.name} joined')
+        self.send_roster()
+
+    def _send_mod(self, conn, message):
+        """A player is missing a mod and asks for it (only the .pcmod files this server offers, which hold data only)."""
+        conn.mod_requests += 1
+        if conn.mod_requests > 30:
+            raise ProtocolError('too many downloads')
+        sha = str(message.get('sha', ''))
+        offered = next((m for m in self.mods if m['sha'] == sha), None)
+        if offered is None:
+            raise ProtocolError('that mod is not on offer')
+        data = Path(offered['path']).read_bytes()
+        chunks = [data[i:i + MOD_CHUNK] for i in range(0, len(data), MOD_CHUNK)] or [b'']
+        for number, chunk in enumerate(chunks):
+            self.send(conn, {'t': 'modfile', 'sha': sha, 'i': number, 'of': len(chunks), 'data': base64.b64encode(chunk).decode()})
 
     def _leave(self, conn):
         if self.players.pop(conn.id, None) is not None and conn.joined:
             self.broadcast({'t': 'leave', 'id': conn.id})
             self.broadcast({'t': 'say', 'm': f'{conn.name} left.'})
             self.log(f'{conn.name} left')
+            self.chatlog(f'* {conn.name} left')
+            self._elect_authority()
+            self.send_roster()
 
     # ---- what players send --------------------------------------------------------------------------------------------------------------
 
     def _message(self, conn, message):
         kind = message['t']
         if kind == 'pos':
-            if not conn.pos_bucket.take():
-                return
-            x, y, z = (proto.number(message.get('x')), proto.number(message.get('y'), -64, 1000), proto.number(message.get('z')))
-            yaw, pitch = proto.number(message.get('yaw', 0), -100000, 100000), proto.number(message.get('pitch', 0), -100000, 100000)
-            moving = bool(message.get('v', False))
-            if conn.frozen:
-                return
-            conn.pos, conn.yaw, conn.pitch = (x, y, z), yaw, pitch
-            self.broadcast({'t': 'pos', 'id': conn.id, 'x': x, 'y': y, 'z': z, 'yaw': yaw, 'pitch': pitch, 'v': moving}, skip=conn)
+            self._position(conn, message)
         elif kind == 'blocks':
             self._blocks(conn, message)
+        elif kind == 'sim':
+            self._sim(conn, message)
         elif kind == 'chat':
             self._chat(conn, proto.clean_chat(message.get('m', '')))
+        elif kind == 'chest':
+            self._chest(conn, message)
+        elif kind == 'code':
+            text = proto.clean_chat(message.get('m', ''))
+            if text:
+                conn.code_log.append((time.time(), text))
+        elif kind == 'roster':
+            if conn.teacher:
+                self.send_roster()
         elif kind == 'ping':
             self.send(conn, {'t': 'pong'})
         else:
             raise ProtocolError('unknown message')
 
+    def _position(self, conn, message):
+        if not conn.pos_bucket.take():
+            return
+        x, y, z = (proto.number(message.get('x')), proto.number(message.get('y'), -64, 1000), proto.number(message.get('z')))
+        yaw, pitch = proto.number(message.get('yaw', 0), -100000, 100000), proto.number(message.get('pitch', 0), -100000, 100000)
+        moving = bool(message.get('v', False))
+        if conn.frozen:
+            return
+        layout = self.world.layout
+        if layout and layout.border and not conn.teacher and not layout.inside_border(x, z):
+            bx1, bz1, bx2, bz2 = layout.border                       # (back inside the border: the edge is as far as anyone goes)
+            self.send(conn, {'t': 'tp', 'x': min(max(x, bx1 + 1), bx2 - 1), 'y': y, 'z': min(max(z, bz1 + 1), bz2 - 1)})
+            self.tell(conn, 'That is the edge of the class world.')
+            return
+        conn.pos, conn.yaw, conn.pitch = (x, y, z), yaw, pitch
+        self.broadcast({'t': 'pos', 'id': conn.id, 'x': x, 'y': y, 'z': z, 'yaw': yaw, 'pitch': pitch, 'v': moving}, skip=conn)
+
     def _blocks(self, conn, message):
         entries = message.get('c')
         if not isinstance(entries, list) or len(entries) > proto.MAX_BLOCKS_PER_MESSAGE:
             raise ProtocolError('too many block changes at once')
+        by_code = bool(message.get('code'))
         if not conn.block_bucket.take(max(1, len(entries))):
-            self.send(conn, {'t': 'reject', 'c': [e[:3] for e in entries if isinstance(e, list) and len(e) >= 3]})
+            self.send(conn, {'t': 'reject', 'c': [e[:3] for e in entries if isinstance(e, list) and len(e) >= 3], 'why': 'Slow down a little.'})
             return
-        accepted, refused = [], []
+        accepted, refused, why = [], [], ''
         for entry in entries:
-            pos, name, facing = proto.block_change(entry, self.known_blocks)
-            if self._may_change(conn, pos, name):
-                accepted.append(entry)
-                self.world.changes[pos] = (name, facing)
+            pos, name, facing, previous = proto.block_change(entry, self.known_blocks)
+            reason = self._why_not(conn, pos, name, by_code)
+            if reason is None:
+                accepted.append(list(entry[:5]))
+                self._record(conn, pos, name, facing, previous, 'code' if by_code else 'hand')
             else:
                 refused.append(list(pos))
+                why = why or reason
         if accepted:
             self.world.dirty = True
             self.broadcast({'t': 'blocks', 'by': conn.id, 'c': accepted}, skip=conn)
         if refused:
-            self.send(conn, {'t': 'reject', 'c': refused})
+            self.send(conn, {'t': 'reject', 'c': refused, 'why': why})
 
-    def _may_change(self, conn, pos, name):
-        if conn.pos is None or conn.frozen or conn.mode == 'spectator':
-            return False
-        if max(abs(pos[0] - conn.pos[0]), abs(pos[1] - conn.pos[1]), abs(pos[2] - conn.pos[2])) > 12:
-            return False                                    # (nobody reaches that far)
+    def _record(self, conn, pos, name, facing, previous, via):
+        """Keep a change: the world now has it, and /history and /undo can find it."""
+        before = self.world.changes.get(pos) or previous                 # (what the server knew, else what the player saw)
+        self.world.changes[pos] = (name, facing)
+        self.history.append({'time': time.time(), 'who': conn.name, 'pos': pos, 'prev': before, 'new': (name, facing), 'via': via,
+                             'undone': False})
+        del self.history[:-HISTORY_LIMIT]
+
+    def _why_not(self, conn, pos, name, by_code=False):
+        """None if this player may make this change, else a short reason to show them."""
+        if conn.frozen:
+            return 'You are frozen.'
+        if conn.mode == 'spectator':
+            return 'You are only looking in spectator mode.'
+        layout = self.world.layout
+        if layout and layout.border and not conn.teacher and not layout.inside_border(pos[0], pos[2]):
+            return 'That is outside the class world.'
+        own = layout.owner_of(conn.name) if layout else None
+        if by_code:
+            if not conn.can_code and not conn.teacher:
+                return 'Building with code is turned off for you.'
+            if self.building_locked and not conn.teacher:
+                return 'Building is locked.'
+            if conn.teacher:
+                return None
+            if own is None:
+                return 'You need a plot to build with code: type /claim.'
+            if not own.contains(pos[0], pos[2]):
+                return 'Code can only build inside your own plot.'
+            return None
+        if conn.pos is None or max(abs(pos[0] - conn.pos[0]), abs(pos[1] - conn.pos[1]), abs(pos[2] - conn.pos[2])) > 12:
+            return 'That is too far away.'
         if conn.mode == 'adventure':
-            return name in TOGGLES                           # (open doors and flick levers, nothing else)
-        if self.building_locked and not conn.teacher:
-            return name in TOGGLES
-        return True
+            return None if name in TOGGLES else 'You are in adventure mode: you cannot build.'
+        if conn.teacher:
+            return None
+        if self.building_locked:
+            return None if name in TOGGLES else 'Building is locked.'
+        if layout and layout.plots and name not in TOGGLES:
+            if own is None:
+                return 'You need a plot to build in: type /claim.'
+            if not own.contains(pos[0], pos[2]):
+                other = layout.plot_at(pos[0], pos[2])
+                return f"This is {other.owner}'s plot." if other and other.owner else 'You can only build in your own plot.'
+        return None
+
+    def _sim(self, conn, message):
+        """The computer that runs the world's water, sand, fire and redstone reports what changed (nobody else may)."""
+        if conn.id != self.authority:
+            raise ProtocolError('not the one running the world')
+        entries = message.get('c')
+        if not isinstance(entries, list) or len(entries) > proto.MAX_BLOCKS_PER_MESSAGE * 4:
+            raise ProtocolError('too many changes at once')
+        accepted = []
+        for entry in entries:
+            pos, name, facing, _previous = proto.block_change(entry, self.known_blocks)
+            self.world.changes[pos] = (name, facing)
+            accepted.append(list(entry[:5]))
+        if accepted:
+            self.world.dirty = True
+            self.broadcast({'t': 'blocks', 'by': 0, 'sim': True, 'c': accepted}, skip=conn)
+
+    def _chest(self, conn, message):
+        pos = (proto.number(message.get('x'), integer=True), proto.number(message.get('y'), 0, proto.HEIGHT - 1, integer=True),
+               proto.number(message.get('z'), integer=True))
+        items = proto.chest_items(message.get('items'), self.known_items)
+        if conn.frozen or conn.mode == 'spectator' or conn.pos is None:
+            return
+        if max(abs(pos[0] - conn.pos[0]), abs(pos[1] - conn.pos[1]), abs(pos[2] - conn.pos[2])) > 12:
+            return
+        if all(i is None for i in items):
+            self.world.chests.pop(pos, None)
+        else:
+            self.world.chests[pos] = items
+        self.world.dirty = True
+        self.broadcast({'t': 'chest', 'x': pos[0], 'y': pos[1], 'z': pos[2], 'items': items}, skip=conn)
 
     def _chat(self, conn, text):
         if not text:
@@ -380,16 +624,29 @@ class LanServer:
             self.tell(conn, 'Slow down a little.')
             return
         if text.startswith('/'):
-            for line in self.command(conn, text[1:]):
+            replies = self.command(conn, text[1:])
+            word = text.split()[0].lower()
+            if conn.teacher and word != '/teacher':                       # (never write a PIN down, not even a wrong one)
+                self.chatlog(f'* {conn.name} (teacher) used {word} {" ".join(text.split()[1:3])}'.rstrip())
+            for line in replies:
                 self.tell(conn, line)
             return
         if conn.muted:
             self.tell(conn, 'You are muted.')
             return
-        self.broadcast({'t': 'chat', 'from': conn.name, 'teacher': conn.teacher, 'm': text})
-        self.log(f'{conn.name}: {text}')
+        if self.chat_locked and not conn.teacher:
+            self.tell(conn, 'Chat is turned off right now.')
+            return
+        shown, flagged = (text, False) if conn.teacher else self.filter_text(text)
+        if flagged:
+            self.tell_teachers(f'[filtered] {conn.name} said: {text}')
+            self.chatlog(f'{conn.name} [filtered]: {text}')
+        else:
+            self.chatlog(f'{conn.name}: {text}')
+        self.broadcast({'t': 'chat', 'from': conn.name, 'teacher': conn.teacher, 'm': shown})
+        self.log(f'{conn.name}: {shown}')
 
-    # ---- commands: /teacher for everyone, the rest for teachers ----------------------------------------------------------------------
+    # ---- commands: /teacher for everyone, the rest for teachers -----------------------------------------------------------------------
 
     def command(self, actor, line):
         """Run a command typed by a player (a Conn) or by the person running the server (actor=None). Returns lines to show them."""
@@ -405,10 +662,12 @@ class LanServer:
         handler = getattr(self, f'_cmd_{word}', None)
         if handler is None:
             return [f'I do not know /{word}. /help shows the commands.']
-        if not is_teacher:
+        if word not in STUDENT_COMMANDS and not is_teacher:
             return ['Only a teacher can do that. (A teacher types /teacher and the PIN.)']
         try:
-            return handler(actor, rest) or []
+            result = handler(actor, rest) or []
+            self.send_roster()
+            return result
         except ValueError as error:
             return [str(error)]
 
@@ -440,6 +699,8 @@ class LanServer:
         self.send_mode(conn)
         self.broadcast({'t': 'say', 'm': f'{conn.name} is a teacher now.'})
         self.log(f'{conn.name} became a teacher')
+        self.chatlog(f'* {conn.name} became a teacher')
+        self.send_roster()
         return ['You are a teacher. /help shows what you can do. (You start in creative mode.)']
 
     def find(self, who, actor=None):
@@ -450,7 +711,8 @@ class LanServer:
         if who.lower() == 'me' and actor is not None:
             return [actor]
         matches = [c for c in self.players.values() if c.name.lower() == who.lower()]
-        matches = matches or [c for c in self.players.values() if c.name.lower().startswith(who.lower())] if who else matches
+        if not matches and who:
+            matches = [c for c in self.players.values() if c.name.lower().startswith(who.lower())]
         if not matches:
             raise ValueError(f'There is nobody called {who!r}. /list shows who is here.' if who else 'Say who: a name, all or me.')
         if len(matches) > 1:
@@ -504,10 +766,17 @@ class LanServer:
         for conn in targets:
             conn.muted = on
             self.tell(conn, 'You are muted.' if on else 'You can chat again.')
-        return [f"{', '.join(c.name for c in targets)} {'muted' if on else 'unmuted'}."]
+        return [f"{', '.join(c.name for c in targets) or 'Nobody'} {'muted' if on else 'unmuted'}."]
 
     def _cmd_unmute(self, actor, rest):
         return self._cmd_mute(actor, rest, on=False)
+
+    def _cmd_chat(self, actor, rest):
+        if rest.lower() not in ('on', 'off'):
+            raise ValueError('/chat on  or  /chat off   (turns chat on or off for all students)')
+        self.chat_locked = rest.lower() == 'off'
+        self.broadcast({'t': 'say', 'm': 'Chat is turned off.' if self.chat_locked else 'Chat is on again.'})
+        return []
 
     def _cmd_kick(self, actor, rest):
         who, _, why = rest.partition(' ')
@@ -553,6 +822,175 @@ class LanServer:
         self.broadcast({'t': 'time', 'ticks': value})
         return []
 
+    # ---- who changed what, and putting it back ----------------------------------------------------------------------------------------
+
+    def _cmd_history(self, actor, rest):
+        now = time.time()
+        if not rest:
+            recent = collections.Counter(e['who'] for e in self.history if now - e['time'] < 600 and not e['undone'])
+            total = collections.Counter(e['who'] for e in self.history if not e['undone'])
+            if not total:
+                return ['Nobody has changed anything yet.']
+            return ['Changes (last 10 minutes / all):'] + [f'  {name}: {recent.get(name, 0)} / {count}' for name, count in total.most_common()]
+        name = self._player_name(rest)
+        entries = [e for e in self.history if e['who'].lower() == name.lower() and not e['undone']]
+        if not entries:
+            return [f'{name} has not changed anything.']
+        lines = [f'{name}: {len(entries)} change(s). The latest:']
+        for entry in entries[-6:]:
+            x, y, z = entry['pos']
+            lines.append(f"  {int(now - entry['time'])}s ago  ({x}, {y}, {z})  {entry['new'][0] or 'air'}  ({entry['via']})")
+        return lines
+
+    def _player_name(self, word):
+        """The name of a player now here (or who changed things earlier): a name or the start of one."""
+        word = word.strip()
+        names = {c.name for c in self.players.values()} | {e['who'] for e in self.history}
+        exact = [n for n in names if n.lower() == word.lower()]
+        matches = exact or [n for n in names if n.lower().startswith(word.lower())]
+        if not matches:
+            raise ValueError(f'There is nobody called {word!r}.')
+        if len(matches) > 1:
+            raise ValueError(f'{word!r} could be {", ".join(sorted(matches))}: type more of the name.')
+        return matches[0]
+
+    def _cmd_undo(self, actor, rest):
+        words = rest.split()
+        if not words:
+            raise ValueError('/undo who 5m   (30s, 5m, 2h, a number of changes like 20, or all)')
+        name = self._player_name(words[0])
+        try:
+            span = proto.parse_span(words[1]) if len(words) > 1 else 300
+        except ValueError as error:
+            raise ValueError(f'/undo {name} how far back? {error}') from None
+        mine = [e for e in reversed(self.history) if e['who'].lower() == name.lower() and not e['undone']]
+        if isinstance(span, tuple):
+            mine = mine[:span[1]]
+        elif span is not None:
+            mine = [e for e in mine if time.time() - e['time'] <= span]
+        restored, skipped, changes = 0, 0, []
+        for entry in mine:                                            # (newest first, so each position ends as it was before)
+            current = self.world.changes.get(entry['pos'])
+            if entry['prev'] is None or current != entry['new']:
+                skipped += 1                                          # (somebody built over it since, or it is not known what was there)
+                continue
+            before = entry['prev']
+            self.world.changes[entry['pos']] = before
+            entry['undone'] = True
+            restored += 1
+            changes.append([entry['pos'][0], entry['pos'][1], entry['pos'][2], before[0], before[1]])
+        for start in range(0, len(changes), proto.MAX_BLOCKS_PER_MESSAGE):
+            self.broadcast({'t': 'blocks', 'by': 0, 'c': changes[start:start + proto.MAX_BLOCKS_PER_MESSAGE]})
+        if restored:
+            self.world.dirty = True
+        who = self.players.get(next((c.id for c in self.players.values() if c.name.lower() == name.lower()), -1))
+        if who is not None:
+            self.tell(who, f'Your teacher put back {restored} of your changes.')
+        self.chatlog(f'* undo {name}: put back {restored}, skipped {skipped}')
+        return [f'Put back {restored} change(s) by {name}.' + (f' ({skipped} could not be: built over since, or unknown.)' if skipped else '')]
+
+    # ---- code building -----------------------------------------------------------------------------------------------------------------
+
+    def _cmd_code(self, actor, rest):
+        words = rest.split()
+        if words and words[0].lower() in ('on', 'off'):
+            targets = self.find(words[1] if len(words) > 1 else 'all', actor)
+            for conn in targets:
+                conn.can_code = words[0].lower() == 'on'
+                self.tell(conn, 'You can build with code.' if conn.can_code else 'Building with code is turned off.')
+            return [f"Building with code is {words[0].lower()} for {len(targets)} player(s)."]
+        if not words:
+            raise ValueError('/code on|off [who|all]   or   /code who  to see what they typed')
+        target = self.find(words[0], actor)[0]
+        if not target.code_log:
+            return [f'{target.name} has not typed any code.']
+        return [f'{target.name} typed:'] + [f'  {text}' for _stamp, text in list(target.code_log)[-8:]]
+
+    # ---- plots -----------------------------------------------------------------------------------------------------------------------------
+
+    def _layout(self):
+        layout = self.world.layout
+        if layout is None or not layout.plots:
+            raise ValueError('This world has no student plots.')
+        return layout
+
+    def _cmd_plots(self, actor, rest):
+        layout = self._layout()
+        return [f"plot {p.id}: {p.owner or '(free)'}" for p in layout.plots]
+
+    def _cmd_claim(self, actor, rest):
+        layout = self._layout()
+        if actor is None:
+            raise ValueError('Only a player can claim a plot. (To give one out: /assign NAME N)')
+        if layout.owner_of(actor.name):
+            return [f'You already have plot {layout.owner_of(actor.name).id}. /home takes you there.']
+        if not layout.self_claim and not actor.teacher:
+            raise ValueError('Ask your teacher for a plot.')
+        free = layout.free_plots()
+        if rest:
+            plot = layout.plot_by_id(int(rest)) if rest.isdigit() else None
+            if plot is None or plot.owner:
+                raise ValueError(f'Plot {rest} is not free. /plots shows which are.')
+        elif free:
+            plot = free[0]
+        else:
+            raise ValueError('All the plots are taken. Ask your teacher.')
+        plot.owner = actor.name
+        self.world.dirty = True
+        self.send_plots()
+        self._send_home(actor, plot)
+        return [f'Plot {plot.id} is yours. Build anywhere inside the stone-brick line.']
+
+    def _send_home(self, conn, plot):
+        x, z = plot.center
+        self.send(conn, {'t': 'tp', 'x': plot.x1 + 1.5, 'y': GROUND + 1.01, 'z': plot.z1 - 1.5 if plot.z1 > 2 else plot.z1 + 1.5})
+
+    def _cmd_home(self, actor, rest):
+        layout = self._layout()
+        plot = layout.owner_of(actor.name) if actor else None
+        if plot is None:
+            raise ValueError('You do not have a plot yet: type /claim.')
+        self._send_home(actor, plot)
+        return [f'Going to plot {plot.id}.']
+
+    def _cmd_goto(self, actor, rest):
+        layout = self._layout()
+        plot = layout.plot_by_id(rest) if rest.isdigit() else None
+        if plot is None:
+            raise ValueError('/goto N   where N is a plot number (/plots lists them)')
+        if actor is None:
+            raise ValueError('Only a teacher in the game can go to a plot.')
+        self._send_home(actor, plot)
+        return [f'Going to plot {plot.id}.']
+
+    def _cmd_assign(self, actor, rest):
+        layout = self._layout()
+        words = rest.rsplit(' ', 1)
+        if len(words) != 2 or not words[1].isdigit():
+            raise ValueError('/assign NAME N   gives plot N to NAME (they do not have to be here yet)')
+        name = proto.clean_name(words[0])
+        for conn in self.players.values():                           # (a name typed in short means the player who is here)
+            if conn.name.lower().startswith(words[0].lower()) and not any(c.name.lower() == words[0].lower() for c in self.players.values()):
+                name = conn.name
+                break
+        old = layout.owner_of(name)
+        if old is not None:
+            old.owner = None
+        plot = layout.assign(int(words[1]), name)
+        self.world.dirty = True
+        self.send_plots()
+        return [f'Plot {plot.id} belongs to {name} now.']
+
+    def _cmd_unassign(self, actor, rest):
+        layout = self._layout()
+        plot = layout.plot_by_id(rest) if rest.isdigit() else layout.owner_of(rest)
+        if plot is None:
+            raise ValueError('/unassign NAME   or   /unassign N')
+        old, plot.owner = plot.owner, None
+        self.world.dirty = True
+        self.send_plots()
+        return [f'Plot {plot.id} is free again (it was {old}\'s).']
+
     # ---- the person running the server ---------------------------------------------------------------------------------------------------
 
     def operator(self, line):
@@ -564,4 +1002,6 @@ class LanServer:
         return future.result(5)
 
     async def _operator(self, line):
-        return self.command(None, line)
+        result = self.command(None, line)
+        self.chatlog(f'* operator: {line.split()[0]}')
+        return result
