@@ -1,12 +1,12 @@
-"""lanplay - play in a classroom (LAN) world: the game window, other players, chat and the teacher's orders.
+"""lanplay - play in a classroom (LAN) world: the game window, other players, chat, plots, code building and the teacher's tools.
 
     python3 lan.py join 192.168.1.23 maple-tiger-42 --name Sam
 
-Press T (or /) to chat. Slash commands: /list, /help, and /teacher PIN to become a teacher (a teacher can then use
-/mode, /freeze, /lock, /mute, /kick, /tp, /bring, /say and /time; /help lists them).
+Keys:  T chat   / chat command   C code prompt (build in your plot with code)   P teacher panel (teachers)   X stop following
+Chat commands: /help lists them. /claim gets you a plot, /home goes to it, /teacher PIN makes you a teacher.
 
-What is shared: the blocks players place and break, where everybody is, and chat. Things that move by themselves (animals,
-water, fire) are not shared yet: this world has no wild animals so everyone sees the same thing."""
+What is shared: blocks (placed by hand or by code), where everybody is, chat, chests, and the world's own changes (water, falling sand,
+fire, redstone), which one player's computer works out for the whole class. Wild animals are not in a class world yet."""
 import math
 import sys
 import tempfile
@@ -19,7 +19,9 @@ sys.path.insert(0, str(HERE))
 POS_INTERVAL = 0.1
 MODE_NAMES = {'adventure': ('survival', True, 'Adventure'), 'survival': ('survival', False, 'Survival'),
               'creative': ('creative', False, 'Creative'), 'spectator': ('spectator', True, 'Spectator')}
+MODE_ORDER = ('adventure', 'survival', 'creative', 'spectator')
 SKINS = ('steve', 'alex', 'ari', 'efe', 'kai', 'makena', 'noor', 'sunny', 'zuri')
+CODE_HEIGHT = 48
 
 
 def skin_for(name):
@@ -35,9 +37,8 @@ def remote_player_type(name):
     """A creature type that looks like a player with this name's skin."""
     import dataclasses
     import mobtypes
-    kind = dataclasses.replace(mobtypes.ZOMBIE, name=f'remote_{name}', title=name, textures={'main': skin_for(name)}, monster=False,
+    return dataclasses.replace(mobtypes.ZOMBIE, name=f'remote_{name}', title=name, textures={'main': skin_for(name)}, monster=False,
                                burns=False, drops=[], sound='', base='remote_player')
-    return kind
 
 
 def make_remote_class():
@@ -54,6 +55,7 @@ def make_remote_class():
             self.player_id, self.player_name = info['id'], info['name']
             self.goal = (info['x'], info['y'], info['z'])
             self.goal_yaw = info.get('yaw', 0.0)
+            self.goal_pitch = info.get('pitch', 0.0)
             self.walking_now = False
             self.rotation_y = self.goal_yaw
             self.tag = Text(info['name'] + ('  [T]' if info.get('teacher') else ''), parent=self, y=kind.height + 0.35, scale=9,
@@ -64,7 +66,7 @@ def make_remote_class():
             self.tag.color = color.yellow if teacher else color.white
 
         def update(self):
-            dt = min(1 / 20, 0.05)
+            dt = 1 / 20
             gx, gy, gz = self.goal
             blend = min(1.0, dt * 14)
             self.moving = self.walking_now
@@ -85,7 +87,7 @@ class Chat:
     """The chat lines at the bottom left, and the line you type into."""
 
     def __init__(self, game, send):
-        from ursina import Entity, InputField, Text, camera, color
+        from ursina import InputField, Text, camera
         self.game, self.send, self.is_open = game, send, False
         self.lines = []                                   # (time, text)
         self.history, self.history_at = [], 0
@@ -94,6 +96,7 @@ class Chat:
         self.field.submit_on = ['enter']
         self.field.on_submit = self._submit
         self._shown = None
+        self._opened_with = self._prefix = None
 
     def add(self, text):
         self.lines.append((time.monotonic(), text))
@@ -151,7 +154,7 @@ class Chat:
         width = min(1.0, window.aspect_ratio - 0.1)
         self.field.scale_x = width
         self.field.x = left + width / 2
-        if self.is_open and getattr(self, '_opened_with', None):
+        if self.is_open and self._opened_with:
             key, self._opened_with = self._opened_with, None
             if self.field.text == self._prefix + key:                  # (the key that opened the chat must not be typed)
                 self.field.text = self._prefix
@@ -165,6 +168,121 @@ class Chat:
             self.text.origin = (-.5, -.5)                             # (a text that changes size must be lined up again)
 
 
+def _grey():
+    from ursina import color
+    return color.rgb32(170, 170, 170)
+
+
+class TeacherPanel:
+    """The teacher's list of students with buttons: mode, freeze, mute, go to, bring, follow, and the class-wide switches.
+    Every button just sends the same /command a teacher could type, so the server stays the one that decides."""
+
+    PER_PAGE = 10
+
+    def __init__(self, game, send, follow):
+        from ursina import Button, Entity, InputField, Text, camera, color
+        self.game, self.send, self.follow = game, send, follow
+        self.is_open, self.page, self.players, self.locked, self.chat_on = False, 0, [], False, True
+        self._dynamic = []
+        self.root = Entity(parent=camera.ui, enabled=False, z=-2)
+        Entity(parent=self.root, model='quad', scale=(1.62, .9), color=color.black66, z=1)
+        Text('Class   (Esc closes)', parent=self.root, x=-.78, y=.4, scale=1.1)
+
+        def button(text, x, y, width, action, tint=80):
+            return Button(parent=self.root, text=text, x=x, y=y, scale=(width, .04), color=color.rgb32(tint, tint, tint),
+                          highlight_color=color.rgb32(tint + 40, tint + 40, tint + 40), on_click=action, text_size=.75)
+
+        self._button = button
+        for number, mode in enumerate(MODE_ORDER):
+            button(f'{mode.title()} (all)', -.6 + number * .185, .34, .175, lambda m=mode: self.send(f'/mode {m} all'))
+        actions = (('Freeze all', '/freeze all'), ('Unfreeze all', '/unfreeze all'), ('Lock building', '/lock'), ('Unlock', '/unlock'),
+                   ('Chat off', '/chat off'), ('Chat on', '/chat on'), ('Day', '/time day'), ('Night', '/time night'))
+        for number, (label, command) in enumerate(actions):
+            button(label, -.6 + number * .185, .29, .175, lambda c=command: self.send(c), 70)
+        self.field = InputField(parent=self.root, x=-.3, y=.235, scale=(.9, .04), character_limit=200, active=False)
+        button('Announce', .38, .235, .2, self._announce, 60)
+        self.status = Text('', parent=self.root, x=-.78, y=.195, scale=.8)
+
+    def _announce(self):
+        text = self.field.text.strip()
+        if text:
+            self.send(f'/say {text}')
+            self.field.text = ''
+
+    def open(self):
+        from ursina import mouse
+        import cursor
+        self.is_open = True
+        self.root.enabled = True
+        self.game.player.enabled = False
+        mouse.locked = False
+        cursor.set_hidden(False)
+        self.rebuild()
+
+    def close(self):
+        from ursina import mouse
+        import cursor
+        self.is_open = False
+        self.root.enabled = False
+        if not getattr(self.game, 'frozen', False):
+            self.game.player.enabled = True
+        mouse.locked = True
+        cursor.set_hidden(True)
+
+    def fit(self):
+        from ursina import window
+        self.root.scale = min(1.0, window.aspect_ratio / 1.7)             # (smaller on a narrow window, so nothing is cut off)
+
+    def input(self, key):
+        if key == 'escape':
+            self.close()
+
+    def update_roster(self, players, locked, chat_on):
+        self.players, self.locked, self.chat_on = players, locked, chat_on
+        if self.is_open:
+            self.rebuild()
+
+    def rebuild(self):
+        from ursina import Text, destroy
+        for entity in self._dynamic:
+            destroy(entity)
+        self._dynamic = []
+        students = sorted(self.players, key=lambda p: (not p['teacher'], p['name'].lower()))
+        pages = max(1, math.ceil(len(students) / self.PER_PAGE))
+        self.page = min(self.page, pages - 1)
+        self.status.text = (f"{len(self.players)} here    building {'LOCKED' if self.locked else 'open'}    chat {'on' if self.chat_on else 'OFF'}"
+                            f"    page {self.page + 1} of {pages}")
+        button = self._button
+        for row, info in enumerate(students[self.page * self.PER_PAGE:(self.page + 1) * self.PER_PAGE]):
+            y = .15 - row * .047
+            who = f"#{info['id']}"
+            tag = ' [T]' if info['teacher'] else ''
+            self._dynamic.append(Text(f"{info['name']}{tag}", parent=self.root, x=-.78, y=y + .01, scale=.85))
+            plot = f"plot {info['plot']}" if info.get('plot') else ''
+            self._dynamic.append(Text(plot, parent=self.root, x=-.5, y=y + .01, scale=.7))
+            next_mode = MODE_ORDER[(MODE_ORDER.index(info['mode']) + 1) % len(MODE_ORDER)] if info['mode'] in MODE_ORDER else 'adventure'
+            self._dynamic.append(button(info['mode'], -.3, y, .13, lambda w=who, m=next_mode: self.send(f'/mode {m} {w}')))
+            self._dynamic.append(button('Unfreeze' if info['frozen'] else 'Freeze', -.16, y, .11,
+                                        lambda w=who, f=info['frozen']: self.send(f"/{'unfreeze' if f else 'freeze'} {w}")))
+            self._dynamic.append(button('Unmute' if info['muted'] else 'Mute', -.04, y, .1,
+                                        lambda w=who, m=info['muted']: self.send(f"/{'unmute' if m else 'mute'} {w}")))
+            self._dynamic.append(button('Go to', .07, y, .09, lambda w=who: (self.send(f'/tp {w}'), self.close())))
+            self._dynamic.append(button('Bring', .17, y, .09, lambda w=who: self.send(f'/bring {w}')))
+            self._dynamic.append(button('Follow', .27, y, .1, lambda i=info['id']: (self.follow(i), self.close())))
+            self._dynamic.append(button('Code ' + ('on' if info['code'] else 'OFF'), .38, y, .12,
+                                        lambda w=who, c=info['code']: self.send(f"/code {'off' if c else 'on'} {w}")))
+            self._dynamic.append(button('Kick', .49, y, .08, lambda w=who: self.send(f'/kick {w}'), 110))
+            if info.get('last'):
+                self._dynamic.append(Text(info['last'], parent=self.root, x=-.78, y=y - .013, scale=.6, color=_grey()))
+        if pages > 1:
+            self._dynamic.append(button('Previous', -.1, -.4, .14, lambda: self._turn(-1)))
+            self._dynamic.append(button('Next', .1, -.4, .14, lambda: self._turn(1)))
+
+    def _turn(self, step):
+        self.page += step
+        self.rebuild()
+
+
 def play(host, port, code, name, screenshot=None, seconds=6, hook=None):
     """Join a classroom world and play in it. Returns when the window is closed."""
     import os
@@ -172,7 +290,7 @@ def play(host, port, code, name, screenshot=None, seconds=6, hook=None):
 
     fix_shaders()
     import ursina
-    from ursina import Ursina, application, camera, color, window
+    from ursina import Ursina, application, color, scene, window
     icon = Path(ursina.__file__).parent / 'textures' / 'ursina.ico'
     os.chdir(HERE)                                        # (the game finds its pictures and sounds from here)
     app = Ursina(title='PythonCraft class', icon=str(icon))
@@ -181,7 +299,7 @@ def play(host, port, code, name, screenshot=None, seconds=6, hook=None):
     window.fps_counter.enabled = window.entity_counter.enabled = window.collider_counter.enabled = False
     window.exit_button.enabled = window.cog_button.enabled = False
 
-    import mods                                           # (the same mods as the server, or it says so)
+    import mods                                           # (the same mods as the server; missing .pcmod files are downloaded from it)
     mods.load_folder()
     from lanclient import LanClient, LanError
     client = LanClient(host, port, code, name)
@@ -191,7 +309,9 @@ def play(host, port, code, name, screenshot=None, seconds=6, hook=None):
         print(f'Could not join: {error}')
         return 1
 
+    from classlayout import GROUND, Layout
     from game import Game
+    from inventory import Stack
     modified = {(c[0], c[1], c[2]): c[3] for c in info['changes']}
     facing = {(c[0], c[1], c[2]): c[4] for c in info['changes'] if c[4]}
     flat = tuple(info['flat_spawn']) if info.get('flat_spawn') else None
@@ -202,18 +322,24 @@ def play(host, port, code, name, screenshot=None, seconds=6, hook=None):
     for mob in game.mobs.mobs[:]:
         game.mobs.remove(mob)
     game.frozen = False
+    world = game.world
     spot = (round(game.player.x), math.floor(game.player.y + 0.5), round(game.player.z))
-    if game.world.solid_top(spot) > 0 or game.world.solid_top((spot[0], spot[1] + 1, spot[2])) > 0:
+    if world.solid_top(spot) > 0 or world.solid_top((spot[0], spot[1] + 1, spot[2])) > 0:
         game.unstuck()                                    # (a start inside a tree or a rock)
 
     Remote = make_remote_class()
     remotes = {}
     chat = Chat(game, client.chat)
     game.chat = chat
-    state = {'last_pos': None, 'timer': 0.0, 'teacher': False, 'locked': False, 'mode': info['mode'], 'recent': {}}
+    state = {'last_pos': None, 'timer': 0.0, 'teacher': False, 'locked': False, 'mode': info['mode'], 'recent': {}, 'authority': False,
+             'layout': Layout(), 'in_plot': None, 'follow': None, 'simbuf': {}, 'skip': set(), 'open_chest': None, 'code_plot': None,
+             'session': None, 'tags': []}
+
+    def console_open():
+        return getattr(game, 'console', None) is not None and game.console.is_open
 
     # ---- the mode the server gave us ----------------------------------------------------------------------------------------------
-    def apply_mode(mode, locked, frozen=None):
+    def apply_mode(mode, locked):
         base, build_locked, title = MODE_NAMES.get(mode, MODE_NAMES['adventure'])
         state['mode'], state['locked'] = mode, locked
         game.player.set_mode(base)
@@ -223,7 +349,7 @@ def play(host, port, code, name, screenshot=None, seconds=6, hook=None):
 
     def set_frozen(on):
         game.frozen = on
-        game.player.enabled = not on and not chat.is_open
+        game.player.enabled = not on and not chat.is_open and not console_open()
         if on:
             game.message('You are frozen. Listen to your teacher.', 4)
 
@@ -233,51 +359,202 @@ def play(host, port, code, name, screenshot=None, seconds=6, hook=None):
     for entry in info['players']:
         remotes[entry['id']] = Remote(game.mobs, entry)
         game.mobs.mobs.append(remotes[entry['id']])
-    chat.add(f"You joined {info['server']} as {client.name}. Press T to chat, /help for commands.")
+    chat.add(f"You joined {info['server']} as {client.name}. Press T to chat, C for code, /help for commands.")
 
-    # ---- sending what you do ----------------------------------------------------------------------------------------------------
-    world = game.world
+    # ---- sending what you do: blocks you place or break, blocks your code builds, and (for one player) what the world does ---------
     capture = {'on': False, 'touched': {}}
     real_set = world._set
 
     def recording_set(pos, kind):
-        if capture['on'] and pos not in capture['touched']:
-            capture['touched'][pos] = (world.get(pos), world.facing.get(pos))     # (what it was, in case the server says no)
+        if capture['on']:
+            if pos not in capture['touched']:
+                capture['touched'][pos] = (world.get(pos), world.facing.get(pos))      # (what it was, in case the server says no)
+        elif state['authority'] and pos not in state['skip'] and pos not in state['simbuf']:
+            state['simbuf'][pos] = (world.get(pos), world.facing.get(pos))
         real_set(pos, kind)
 
     world._set = recording_set
 
+    def run_captured(function, code=False):
+        capture['on'], capture['touched'] = True, {}
+        try:
+            return function()
+        finally:
+            capture['on'] = False
+            changes = []
+            for pos, before in capture['touched'].items():
+                now = (world.get(pos), world.facing.get(pos))
+                if now != before:
+                    changes.append((pos[0], pos[1], pos[2], now[0], now[1], before[0], before[1]))
+                    state['recent'][pos] = (before, time.monotonic())
+            if changes:
+                client.send_blocks(changes, code=code)
+
     def wrap(method):
         def wrapper(*args, **kwargs):
-            capture['on'], capture['touched'] = True, {}
-            try:
-                return method(*args, **kwargs)
-            finally:
-                capture['on'] = False
-                changes = []
-                for pos, before in capture['touched'].items():
-                    now = (world.get(pos), world.facing.get(pos))
-                    if now != before:
-                        changes.append((pos[0], pos[1], pos[2], now[0] if now[0] != 'air' else None, now[1]))
-                        state['recent'][pos] = (before, time.monotonic())
-                if changes:
-                    client.send_blocks(changes)
+            return run_captured(lambda: method(*args, **kwargs))
         return wrapper
 
     for name_ in ('_place', '_break', '_use'):
         setattr(game.interaction, name_, wrap(getattr(game.interaction, name_)))
 
     def apply_block(pos, name_, facing_):
-        """Make a block the way the server says (this is not echoed back)."""
+        """Make a block the way the server says (it is not sent back). The computer that runs the world lets the neighbours react."""
         current = world.get(pos)
         if current == name_ and world.facing.get(pos) == facing_:
             return
-        if current is not None:
-            world.remove(pos)
-        if name_ is not None:
-            world.place(pos, name_, facing_)
+        state['skip'].add(pos)
+        try:
+            notify = state['authority']
+            if current is not None:
+                world.remove(pos, notify=notify)
+            if name_ is not None:
+                world.place(pos, name_, facing_, notify=notify)
+        finally:
+            state['skip'].discard(pos)
 
-    # ---- what the server sends --------------------------------------------------------------------------------------------------
+    # ---- chests are shared when somebody closes one ----------------------------------------------------------------------------------
+    def chest_to_world(x, y, z, items):
+        stacks = [Stack(i[0], i[1], i[2]) if i else None for i in items]
+        existing = world.chests.get((x, y, z))
+        if existing is not None:
+            existing[:] = stacks                              # (in place: a chest that is open right now shows it)
+        else:
+            world.chests[(x, y, z)] = stacks
+
+    for x, y, z, items in info.get('chests', []):
+        chest_to_world(x, y, z, items)
+    real_open_chest, real_close = game.ui.open_chest, game.ui.close
+
+    def open_chest(position):
+        state['open_chest'] = position
+        return real_open_chest(position)
+
+    def close_ui():
+        position, state['open_chest'] = state['open_chest'], None
+        real_close()
+        if position is not None and position in world.chests:
+            items = [[s.name, s.count, s.damage] if s else None for s in world.chests[position]]
+            client.send_chest(position[0], position[1], position[2], items)
+
+    game.ui.open_chest, game.ui.close = open_chest, close_ui
+
+    # ---- one computer runs the world's water, falling sand, fire and redstone for everybody ---------------------------------------------
+    sims = [(game.fluids, 'update'), (game.falling, 'update'), (game.fire, 'update'), (game.redstone, 'update'), (game.plants, 'update'),
+            (game.tnt, 'update')]
+    originals = {id(obj): getattr(obj, attr) for obj, attr in sims}
+
+    def set_authority(on):
+        state['authority'] = on
+        for obj, attr in sims:
+            setattr(obj, attr, originals[id(obj)] if on else (lambda dt: None))
+        if on and game.falling.check not in world.listeners:
+            world.listeners.append(game.falling.check)
+        if not on and game.falling.check in world.listeners:
+            world.listeners.remove(game.falling.check)
+        state['simbuf'].clear()
+
+    set_authority(False)
+
+    def flush_sim():
+        buffered, state['simbuf'] = state['simbuf'], {}
+        changes = []
+        for pos, before in buffered.items():
+            now = (world.get(pos), world.facing.get(pos))
+            if now != before:
+                changes.append((pos[0], pos[1], pos[2], now[0], now[1], before[0], before[1]))
+        if changes:
+            client.send_sim(changes)
+
+    # ---- plots: name tags, who is where, and the code prompt that builds inside your plot --------------------------------------------
+    from gameconsole import GameConsole
+    from livecode import Session
+    import pycraft
+
+    class Current:
+        """The completer of whichever code session is in use (it changes when you get a plot)."""
+
+        def __getattr__(self, attribute):
+            return getattr(state['session'].completer, attribute)
+
+    def make_session(plot_info):
+        if plot_info is None:
+            width = depth = 8
+            origin = (0, GROUND + 1, 0)
+        else:
+            width, depth = plot_info['x2'] - plot_info['x1'] + 1, plot_info['z2'] - plot_info['z1'] + 1
+            origin = (plot_info['x1'], GROUND + 1, plot_info['z1'])
+        plot = pycraft.plot(min(width, 256), CODE_HEIGHT, min(depth, 256))
+        plot._game, plot._origin, plot._networked = game, origin, True
+        plot._runtime.update(queue=[], closed=False, gallery=None, name=None, enter_state={}, timers={}, weather=None)
+        if plot_info is None:
+            plot._wrap_call = lambda function: game.message('You need a plot to build with code: type /claim in the chat.', 4)
+        else:
+            plot._wrap_call = lambda function: run_captured(function, code=True)
+        session = Session(plot, delay=2)
+        session.lan_plot = plot_info['id'] if plot_info else None
+        return session
+
+    def switch_session(plot_info):
+        state['session'] = make_session(plot_info)
+        state['code_plot'] = plot_info['id'] if plot_info else None
+
+    def feed(line):
+        """What is typed in the code prompt (a teacher can also say `plot 3` to work in another plot)."""
+        text = line.strip()
+        if state['teacher'] and text.lower().startswith('plot ') and text[5:].strip().isdigit():
+            plot_info = next((p for p in state['layout'].to_json()['plots'] if p['id'] == int(text[5:])), None)
+            if plot_info is None:
+                print(f'There is no plot {text[5:].strip()}.')
+            else:
+                switch_session(plot_info)
+                print(f"Your code now builds in plot {plot_info['id']}.")
+            return
+        if text:
+            client.send_code(text[:200])
+        state['session'].feed(line)
+
+    switch_session(None)
+    game.console = GameConsole(game, feed, lambda: state['session'].more_prompt if state['session'].__dict__.get('_buffer')
+                               else state['session'].prompt, Current(),
+                               lambda: state['session'].completer.indent_for(state['session'].__dict__.get('_buffer')),
+                               lambda text: state['session'].needs_more(text),
+                               title='Code  (builds in your plot. Enter runs, Tab completes, Shift+Enter new line, Esc closes)')
+
+    def draw_tags():
+        from ursina import Text, destroy
+        for entity in state['tags']:
+            destroy(entity)
+        state['tags'] = []
+        for plot_info in state['layout'].to_json()['plots']:
+            cx = (plot_info['x1'] + plot_info['x2']) / 2
+            label = f"Plot {plot_info['id']}\n{plot_info['owner'] or '(free: /claim)'}"
+            state['tags'].append(Text(label, parent=scene, position=(cx, GROUND + 9, plot_info['z1'] - 1), billboard=True, scale=22,
+                                      origin=(0, 0), color=color.yellow if plot_info['owner'] else color.white))
+
+    def set_plots(message):
+        state['layout'] = Layout.from_json({'plots': message.get('plots', []), 'border': message.get('border'), 'spawn': None})
+        draw_tags()
+        mine = state['layout'].owner_of(client.name)
+        wanted = mine.id if mine else None
+        if wanted != state['code_plot'] and not (state['teacher'] and state['code_plot'] is not None):
+            switch_session(mine.to_json() if mine else None)
+
+    if info.get('plots'):
+        set_plots(info['plots'])
+
+    # ---- the teacher's panel and following a student -----------------------------------------------------------------------------------
+    def follow(player_id):
+        if player_id in remotes:
+            state['follow'] = player_id
+            client.chat('/mode spectator me')
+            chat.add('Following a student: press X to stop.')
+
+    panel = TeacherPanel(game, client.chat, follow)
+    game.lan = type('Lan', (), {'state': state, 'panel': panel, 'client': client, 'remotes': remotes,
+                                'switch_session': staticmethod(switch_session), 'set_authority': staticmethod(set_authority)})()
+
+    # ---- what the server sends ----------------------------------------------------------------------------------------------------------
     def handle(message):
         kind = message['t']
         if kind == 'pos':
@@ -285,6 +562,7 @@ def play(host, port, code, name, screenshot=None, seconds=6, hook=None):
             if remote is not None:
                 remote.goal = (message['x'], message['y'], message['z'])
                 remote.goal_yaw = message.get('yaw', 0.0)
+                remote.goal_pitch = message.get('pitch', 0.0)
                 remote.walking_now = bool(message.get('v'))
         elif kind == 'join':
             entry = message['p']
@@ -295,15 +573,17 @@ def play(host, port, code, name, screenshot=None, seconds=6, hook=None):
             remote = remotes.pop(message['id'], None)
             if remote is not None:
                 game.mobs.remove(remote)
+            if state['follow'] == message['id']:
+                state['follow'] = None
         elif kind == 'blocks':
-            for x, y, z, name_, facing_ in message['c']:
-                apply_block((x, y, z), name_, facing_)
+            for entry in message['c']:
+                apply_block((entry[0], entry[1], entry[2]), entry[3], entry[4])
         elif kind == 'reject':
             for x, y, z in message['c']:
                 before = state['recent'].pop((x, y, z), None)
                 if before is not None:
                     apply_block((x, y, z), *before[0])
-            game.message('You cannot build here right now.', 2)
+            game.message(message.get('why') or 'You cannot build here right now.', 3)
         elif kind == 'chat':
             chat.add(f"{'[T] ' if message.get('teacher') else ''}{message['from']}: {message['m']}")
         elif kind == 'say':
@@ -325,7 +605,19 @@ def play(host, port, code, name, screenshot=None, seconds=6, hook=None):
             game.sky.set_time(message['ticks'])
         elif kind == 'role':
             state['teacher'] = bool(message.get('teacher'))
-            game.message('You are a teacher.' if state['teacher'] else 'You are a student again.', 4)
+            game.message('You are a teacher. Press P for the class panel.' if state['teacher'] else 'You are a student again.', 5)
+        elif kind == 'roster':
+            panel.update_roster(message['players'], message.get('locked', False), message.get('chat', True))
+            for entry in message['players']:
+                remote = remotes.get(entry['id'])
+                if remote is not None:
+                    remote.set_teacher(entry['teacher'])
+        elif kind == 'plots':
+            set_plots(message)
+        elif kind == 'authority':
+            set_authority(bool(message.get('on')))
+        elif kind == 'chest':
+            chest_to_world(message['x'], message['y'], message['z'], message['items'])
         elif kind == 'closed' or kind == 'kick':
             game.message(message.get('m', 'Disconnected.'), 8)
             chat.add(message.get('m', 'Disconnected.'))
@@ -339,6 +631,17 @@ def play(host, port, code, name, screenshot=None, seconds=6, hook=None):
             handle(message)
         for pos in [p for p, (_, stamp) in state['recent'].items() if time.monotonic() - stamp > 4]:
             state['recent'].pop(pos, None)
+        session = state['session']
+        if session is not None:
+            session.plot._run_queue(dt)                       # (what your code builds, a few blocks each frame)
+        if state['authority']:
+            flush_sim()
+        # following a student: stand behind them and look where they look
+        if state['follow'] in remotes:
+            remote = remotes[state['follow']]
+            behind = math.radians(remote.rotation_y + 180)
+            game.player.position = (remote.x + math.sin(behind) * 3.0, remote.y + 1.6, remote.z + math.cos(behind) * 3.0)
+            game.player.rotation_y = remote.rotation_y
         state['timer'] += dt
         if state['timer'] >= POS_INTERVAL and not client.closed:
             state['timer'] = 0.0
@@ -353,7 +656,17 @@ def play(host, port, code, name, screenshot=None, seconds=6, hook=None):
             elif state.get('was_moving'):
                 client.send_pos(player.x, player.y, player.z, player.rotation_y, player.camera_pivot.rotation_x, False)
                 state['was_moving'] = False
+            plot = state['layout'].plot_at(round(player.x), round(player.z))
+            ident = plot.id if plot else None
+            if ident != state['in_plot']:
+                state['in_plot'] = ident
+                if plot is not None:
+                    game.message(f"Plot {plot.id}: {plot.owner or 'free (type /claim)'}", 2)
         chat.update()
+        chat.text.enabled = not (panel.is_open or console_open())            # (the chat lines would be in the way)
+        panel.fit()
+        if game.console is not None:
+            game.console.update(dt)
         if state.get('gone') and time.monotonic() - state['gone'] > 6:
             application.quit()
 
@@ -366,12 +679,28 @@ def play(host, port, code, name, screenshot=None, seconds=6, hook=None):
         if chat.is_open:
             chat.input(key)
             return
+        if panel.is_open:
+            panel.input(key)
+            return
+        if console_open():
+            game.input(key)
+            return
         if not game.ui.active and not game.menu.is_open and not game.menu.just_closed() and not game.player.dead:
             if key == 't':
                 chat.open('', 't')
                 return
             if key == '/':
                 chat.open('/', '/')
+                return
+            if key == 'c' and state['session'] is not None:
+                game.console.open('c')
+                return
+            if key == 'p' and state['teacher']:
+                panel.open()
+                return
+            if key == 'x' and state['follow'] is not None:
+                state['follow'] = None
+                client.chat('/mode creative me')
                 return
         game.input(key)
 

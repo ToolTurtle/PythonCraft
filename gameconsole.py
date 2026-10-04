@@ -47,7 +47,7 @@ class GameConsole:
         self._pending = ''
         self._incoming = queue.Queue()
         self._jobs = queue.Queue()
-        self._skip_slash = False
+        self._skip_key = None
         self.root = Entity(parent=camera.ui, enabled=False)
         Entity(parent=self.root, model='quad', scale=(1.5, .66), position=(0, .165, 1), color=color.black66)
         self.title = Text(title, parent=self.root, x=-.72, y=.455, scale=.85, color=color.rgb32(170, 170, 170))
@@ -99,7 +99,7 @@ class GameConsole:
 
     # ---- opening and closing -----------------------------------------------------------------------------------------------
 
-    def open(self):
+    def open(self, key='/'):
         if self.is_open:
             return
         self.is_open = True
@@ -108,7 +108,7 @@ class GameConsole:
         mouse.locked = False
         cursor.set_hidden(False)
         self.field.active = True
-        self._skip_slash = True                           # (the / that opened it must not be typed)
+        self._skip_key = key                              # (the key that opened it must not be typed)
         self._hinted = None
 
     def close(self):
@@ -185,10 +185,10 @@ class GameConsole:
     def update(self, dt):
         from ursina import window
         self.root.scale = min(1.0, window.aspect_ratio / 1.56)         # (smaller on a narrow window, so nothing is cut off)
-        if self._skip_slash and self.is_open:
-            self._skip_slash = False
-            if self.field.text.startswith('/'):
-                self._set_text(self.field.text[1:])
+        if self._skip_key and self.is_open:
+            key, self._skip_key = self._skip_key, None
+            if self.field.text.startswith(key):
+                self._set_text(self.field.text[len(key):])
         if self.is_open and self.completer is not None:
             lines, y, x = self._where()
             shown = lines[y][:x]

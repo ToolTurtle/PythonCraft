@@ -598,6 +598,9 @@ class Plot:
         self.title = ''                   # a name for the build (saved in the .pcplot file)
         self.tutorial = None              # tutorial notes for tutorialworld.py: {'level', 'summary', 'steps', 'try_it', 'code'}
         self._signs = {}                  # (x, y, z) -> pages of text on that sign
+        self._origin = None               # where plot (0, 0, 0) is in the game world (x, y, z); None: the usual plot place
+        self._wrap_call = None            # a function that runs each piece of work for the game (class worlds use it to share blocks)
+        self._networked = False           # True in a class (LAN) world: creatures, weather and such are not shared there
         self._npcs = []                   # [{'creature', 'name', 'lines'}] for npc() characters
         self._student = None              # who you said you are in submit()
         self._journal = None              # while a step is being recorded: what changed (for undo)
@@ -626,13 +629,36 @@ class Plot:
         """A builder you steer with forward(), right(), up()... (see Turtle). It builds in this plot."""
         return Turtle(self, x, y, z, facing, block, pen)
 
+    def _gpos(self, pos):
+        """Where a plot position is in the game's world."""
+        ox, oy, oz = self._origin if self._origin else (0, _FLOOR + 1, 0)
+        return (pos[0] + ox, pos[1] + oy, pos[2] + oz)
+
+    def _run(self, function):
+        (self._wrap_call or (lambda f: f()))(function)
+
+    def _run_queue(self, dt):
+        """Do the work your own thread queued for the game (a few things each frame; block placements wait their turn: delay())."""
+        deadline = _time.perf_counter() + 0.008
+        delay = self._build_delay
+        credit = self._runtime.get('credit', 0.0) + dt
+        while self._runtime['queue'] and _time.perf_counter() < deadline:
+            if delay > 0 and self._runtime['queue'][0][1]:
+                if credit < delay:
+                    break                                  # wait for the next block's turn
+                credit -= delay
+            with self._lock:
+                function, _is_block = self._runtime['queue'].pop(0)
+            self._run(function)
+        self._runtime['credit'] = min(credit, delay) if delay > 0 else 0.0
+
     def _later(self, function, block=False):
         """Do something to the running game. (From your own thread it waits for the next frame; nothing happens
         if the game is not open.) block=True marks a block placement, which delay() slows down so you can watch."""
         if self._game is None:
             return
         if _on_main_thread():
-            function()
+            self._run(function)
         else:
             with self._lock:
                 self._runtime['queue'].append((function, block))
@@ -645,7 +671,7 @@ class Plot:
 
         def apply():
             world = self._game.world
-            game_pos = _to_game(*pos)
+            game_pos = self._gpos(pos)
             if name is None and world.get(game_pos) is None:
                 return
             world.set_fluid(game_pos, name)
@@ -882,7 +908,7 @@ class Plot:
         self._signs.pop(pos, None)
         self._hooks['click'].pop(pos, None)
         if self._game is not None:
-            self._later(lambda: self._game.interaction.click_hooks.pop(_to_game(*pos), None))
+            self._later(lambda: self._game.interaction.click_hooks.pop(self._gpos(pos), None))
 
     def onclick_sign(self, pos, pages):
         """Make the sign at pos readable again (used when a sign is put back by redo())."""
@@ -1108,6 +1134,8 @@ class Plot:
         'iron_golem', 'zombie_pigman', 'ghast'... (moblist() shows them all). Hostile ones will come after you in the game
         unless you use runplot(..., peaceful=True). (The older order, spawnmob('zombie', 5, 1, 5), still works.)"""
         from mobtypes import TYPES
+        if self._networked:
+            raise ValueError('Creatures are not shared in a class world yet, so spawnmob is not available here.')
         if isinstance(x, str):                                    # the older order: name first
             x, y, z, name = y, z, name, x
         key = str(name).strip().lower().replace(' ', '_')
@@ -1610,14 +1638,16 @@ class Plot:
         if self._game is None:
             self._start[0] = (x, y, z)
             return
-        self._later(lambda: setattr(self._game.player, 'position', _player_feet(x, y, z)))
+        ox, oy, oz = self._origin if self._origin else (0, _FLOOR + 1, 0)
+        self._later(lambda: setattr(self._game.player, 'position', (x + ox, y + oy - 0.48, z + oz)))
 
     def playerpos(self):
         """Where the player is, in plot coordinates (x, y, z), or where they will start if the game is not open."""
         if self._game is None:
             return self._start[0] or (self._plot[0] / 2, 0, -max(3, self._plot[0] // 4))
         p = self._game.player
-        return (round(p.x, 1), round(p.y - _FLOOR - 0.5, 1), round(p.z, 1))
+        ox, oy, oz = self._origin if self._origin else (0, _FLOOR + 1, 0)
+        return (round(p.x - ox, 1), round(p.y - oy + 0.5, 1), round(p.z - oz, 1))
 
     def playsound(self, name='click', volume=1.0):
         """Play a sound: 'levelup', 'pop', 'click', 'explode', 'door', 'orb', 'fire', 'lever', 'bow', 'break', 'enchant', 'fuse'."""
@@ -1641,7 +1671,7 @@ class Plot:
         pos = self._check(x, y, z)
         self._hooks['click'][pos] = function
         if self._game is not None:
-            self._later(lambda: self._game.interaction.click_hooks.__setitem__(_to_game(*pos), lambda: self._call(function, *pos)))
+            self._later(lambda: self._game.interaction.click_hooks.__setitem__(self._gpos(pos), lambda: self._call(function, *pos)))
 
     def onkey(self, key, function):
         """Run `function` when a key is pressed, e.g. w.onkey('f', launch). Use letters or digits; avoid
@@ -1919,19 +1949,7 @@ def runplot(plot, mode='adventure', time=None, border=True, dimension='overworld
     import __main__
 
     def tick(dt):
-        # work your own thread asked for
-        deadline = _time.perf_counter() + 0.008
-        delay = plot._build_delay
-        credit = plot._runtime.get('credit', 0.0) + dt
-        while plot._runtime['queue'] and _time.perf_counter() < deadline:
-            if delay > 0 and plot._runtime['queue'][0][1]:
-                if credit < delay:
-                    break                                  # wait for the next block's turn
-                credit -= delay
-            with plot._lock:
-                function, _is_block = plot._runtime['queue'].pop(0)
-            function()
-        plot._runtime['credit'] = min(credit, delay) if delay > 0 else 0.0
+        plot._run_queue(dt)                                    # work your own thread asked for
         game.world.flush_dirty(0.006)
         mod_runtime.update(dt)
         if game.console is not None:

@@ -61,6 +61,87 @@ server.stop()
 '''
 
 
+CLASS_SCRIPT = '''
+import sys, time, threading
+sys.path.insert(0, {root!r})
+from classlayout import Layout
+from lanserver import LanServer, WorldState
+from lanclient import LanClient
+
+layout = Layout.grid(2, 1, width=16, depth=16, gap=5, names=['Sam'])
+world = WorldState(0, 'Class', list(layout.spawn), {{pos: (name, None) for pos, name in layout.marker_blocks().items()}}, layout)
+server = LanServer(world, pin='teach1', code='maple-tiger-42', host='127.0.0.1', port=0).start()
+ann_events = []
+
+def ann():
+    for _ in range(100):
+        time.sleep(0.1)
+        if any(p.name == 'Sam' and p.pos is not None for p in server.players.values()):
+            break
+    c = LanClient('127.0.0.1', server.port, 'maple-tiger-42', 'Ann')
+    c.connect()
+    c.chat('/claim')
+    while not c.closed:
+        ann_events.extend(c.poll())
+        time.sleep(0.05)
+
+threading.Thread(target=ann, daemon=True).start()
+
+def hook(game, client, remotes, chat):
+    from ursina import invoke
+    from inventory import Stack
+    lan = game.lan
+    session = lan.state['session']
+    print('SESSION_PLOT', session.lan_plot, 'AUTHORITY', lan.state['authority'], 'TAGS', len(lan.state['tags']), flush=True)
+    session.feed('fill 0 0 0 3 0 3 gold_block')
+    session.feed('placeblock 6 5 6 sand')
+    session.feed('placeblock 8 0 8 chest')
+    game.player.position = (8, 5, 6)                                   # (next to the chest: the server only believes chests that are near)
+    def use_chest():
+        game.ui.open_chest((8, 4, 8))
+        game.world.chests[(8, 4, 8)][0] = Stack('stone', 3)
+        game.ui.close()
+    invoke(use_chest, delay=0.7)
+    lan.state['teacher'] = True
+    lan.panel.update_roster([{{'id': 1, 'name': 'Sam', 'teacher': False, 'mode': 'adventure', 'frozen': False, 'muted': False, 'code': True, 'plot': 1, 'last': 'fill'}}], False, True)
+    lan.panel.open()
+    print('PANEL_ROWS', len(lan.panel._dynamic) > 5, flush=True)
+    lan.panel.close()
+    def check():
+        print('GOLD', server.world.changes.get((0, 4, 0)), flush=True)
+        print('CHEST', server.world.chests.get((8, 4, 8), [None])[0], flush=True)
+        sand = [e for e in ann_events if e['t'] == 'blocks' and e.get('sim') and any(c[3] == 'sand' for c in e['c'])]
+        print('SAND_SIM', bool(sand), flush=True)
+        print('PLOT2', server.world.layout.plot_by_id(2).owner, flush=True)
+        code_blocks = [e for e in ann_events if e['t'] == 'blocks' and e['by'] != 0 and not e.get('sim')]
+        print('ANN_SAW_CODE_BLOCKS', len(code_blocks) > 0, flush=True)
+    invoke(check, delay=3.5)
+
+import lanplay
+lanplay.play('127.0.0.1', server.port, 'maple-tiger-42', 'Sam', seconds=6, hook=hook)
+server.stop()
+'''
+
+
+@unittest.skipIf(os.environ.get('PYCRAFT_NO_WINDOW'), 'PYCRAFT_NO_WINDOW is set')
+class ClassWorld(unittest.TestCase):
+    def test_plots_code_sand_chests_and_the_panel(self):
+        folder = scratch('lan_class')
+        script = folder / 'run.py'
+        script.write_text(CLASS_SCRIPT.format(root=str(ROOT)))
+        out = subprocess.run([sys.executable, str(script)], capture_output=True, text=True, timeout=240, cwd=str(ROOT))
+        text = out.stdout + out.stderr[-2500:]
+        self.assertIn('SESSION_PLOT 1', out.stdout, text)                  # Sam owns plot 1: code goes there
+        self.assertIn('AUTHORITY True', out.stdout, text)                   # the first player runs the world for everyone
+        self.assertIn("GOLD ('gold_block', None)", out.stdout, text)        # the code built inside the plot, and the server has it
+        self.assertIn("CHEST ['stone', 3, 0]", out.stdout, text)            # a closed chest is shared
+        self.assertIn('SAND_SIM True', out.stdout, text)                    # the sand Sam's computer let fall reached another player
+        self.assertIn('PLOT2 Ann', out.stdout, text)                        # Ann claimed the other plot
+        self.assertIn('ANN_SAW_CODE_BLOCKS True', out.stdout, text)
+        self.assertIn('PANEL_ROWS True', out.stdout, text)
+        self.assertNotIn('Traceback', out.stderr, text)
+
+
 @unittest.skipIf(os.environ.get('PYCRAFT_NO_WINDOW'), 'PYCRAFT_NO_WINDOW is set')
 class LanGame(unittest.TestCase):
     def test_two_players_and_a_teacher(self):

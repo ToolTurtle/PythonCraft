@@ -706,6 +706,11 @@ class LanServer:
     def find(self, who, actor=None):
         """The players a word stands for: a name (or the start of one), 'all' (every student) or 'me'."""
         who = who.strip()
+        if who.startswith('#') and who[1:].isdigit():                 # (#3: exactly player number 3, whatever their name looks like)
+            found = self.players.get(int(who[1:]))
+            if found is None:
+                raise ValueError(f'There is nobody with number {who[1:]}.')
+            return [found]
         if who.lower() == 'all':
             return [c for c in self.players.values() if not c.teacher]
         if who.lower() == 'me' and actor is not None:
@@ -724,7 +729,7 @@ class LanServer:
         if not words or words[0].lower() not in proto.MODES:
             raise ValueError(f'/mode MODE [who|all]   where MODE is {", ".join(proto.MODES)}')
         mode = words[0].lower()
-        targets = self.find(words[1] if len(words) > 1 else 'all', actor)
+        targets = self.find(' '.join(words[1:]) or 'all', actor)
         for conn in targets:
             conn.mode = mode
             self.send_mode(conn)
