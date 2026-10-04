@@ -23,7 +23,7 @@ def rank(token, names, limit=40):
     """Names that start with the token, then names that contain it, then close spellings."""
     low = token.lower()
     names = list(dict.fromkeys(names))
-    first = sorted(n for n in names if n.lower().startswith(low))
+    first = sorted((n for n in names if n.lower().startswith(low)), key=lambda n: (len(n), n))
     if not low:
         return first[:limit]
     second = sorted(n for n in names if low in n.lower() and n not in first)
@@ -145,7 +145,9 @@ class Completer:
         if function:
             names = self._role(function, index)
             if names is not None and token and '.' not in token:
-                return start, rank(token, [f"'{n}'" for n in names]) if not token.startswith('pc') else rank(token, self._namespace_names())
+                if token.startswith('pc'):
+                    return start, rank(token, self._namespace_names())
+                return start, [f"'{n}'" for n in rank(token, names)]
         # a dotted name:  pc.ob   w.fi
         if '.' in token:
             head, _, tail = token.rpartition('.')
@@ -199,27 +201,43 @@ class Completer:
 
     # ---- Tab ---------------------------------------------------------------------------------------------------------------
 
+    def _suffix(self, line, start, candidate):
+        """What follows a finished argument inside a Python call: the closing quote, then `, ` (more arguments to come) or `)`."""
+        quotes = [m.start() for m in re.finditer(r'[\'"]', line[:start + 1] if start < len(line) else line)]
+        inside = line[start - 1:start] in ('"', "'") and len([m for m in re.finditer(r'[\'"]', line[:start])]) % 2 == 1
+        quote = line[start - 1] if inside else ''
+        quoted_form = candidate.startswith("'")
+        before = line[:start - 1] if inside else line[:start]
+        function, index = self._call_context(before)
+        if not function or not (inside or quoted_form or candidate.startswith('pc.')):
+            return ''
+        params = self._params(function)
+        if not params:
+            return quote
+        more = index + 1 < len(params)
+        return quote + (', ' if more else ')')
+
     def tab(self, line, state=None):
         """The line after pressing Tab, and the state to give back for the next Tab: a single match is completed, several
         matches are completed as far as they agree, and pressing Tab again goes through them one by one."""
         if state and state['shown'] == line:
             index = (state['index'] + 1) % len(state['candidates'])
-            new = state['base'] + state['candidates'][index]
+            new = state['base'] + state['candidates'][index] + state['suffix']
             return new, dict(state, index=index, shown=new)
         start, candidates = self.completions(line, force=True)
         if not candidates:
             return line, None
         token = line[start:]
         base = line[:start]
+        suffix = self._suffix(line, start, candidates[0])
         if len(candidates) == 1:
-            new = base + candidates[0]
-            return new, None
+            return base + candidates[0] + suffix, None
         common = _common_prefix(candidates)
         if len(common) > len(token):
             new = base + common
-            return new, {'base': base, 'candidates': candidates, 'index': -1, 'shown': new}
-        new = base + candidates[0]
-        return new, {'base': base, 'candidates': candidates, 'index': 0, 'shown': new}
+            return new, {'base': base, 'candidates': candidates, 'index': -1, 'shown': new, 'suffix': suffix}
+        new = base + candidates[0] + suffix
+        return new, {'base': base, 'candidates': candidates, 'index': 0, 'shown': new, 'suffix': suffix}
 
     def hint(self, line):
         """Two short lines for under the prompt: how the command is written, and what could come next."""
