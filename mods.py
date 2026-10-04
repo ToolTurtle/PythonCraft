@@ -128,6 +128,8 @@ class Mod:
         self.name = _slug(name, 'mod name')
         self.folder = Path(folder) if folder else _caller_dir()
         self.blocks, self.items, self.mobs = [], [], []
+        self.ops = []                    # what was done, in order: kept so the mod can be saved as a .pcmod
+        self.title = self.description = ''
         ACTIVE.append(self)
 
     def __repr__(self):
@@ -184,20 +186,30 @@ class Mod:
                 close = difflib.get_close_matches(key, _BLOCK_PROPS, n=2)
                 raise ValueError(f'Unknown option {key!r} for a block.' + (f' Did you mean {" or ".join(close)}?' if close else
                                  f' The options are: {", ".join(_BLOCK_PROPS)}.'))
+        for key, value in props.items():
+            numeric, flag = key in ('hardness', 'light', 'tier'), key in ('solid', 'transparent', 'translucent', 'gravity', 'placeable')
+            if numeric and (isinstance(value, bool) or not isinstance(value, (int, float))) or flag and not isinstance(value, bool) \
+                    or not (numeric or flag) and value is not None and not isinstance(value, str):
+                raise ValueError(f'The option {key} has the wrong kind of value: {value!r} ' +
+                                 ('(a number)' if numeric else '(True or False)' if flag else '(text, like "stone")') + '.')
         spec = {'hardness': 1.0, 'fallback': _fallback_color()}
         material = None
+        recorded_props = dict(props)
         if like is not None:
             if like not in blocks.BLOCKS:
                 close = difflib.get_close_matches(str(like), list(blocks.BLOCKS), n=3)
                 raise ValueError(f'There is no block called {like!r} to copy.' + (f' Did you mean {", ".join(close)}?' if close else ''))
             spec = {k: v for k, v in blocks.BLOCKS[like].items() if k not in _TEXTURE_KEYS and k != 'placeable'}
             material = sound.MATERIAL.get(like, 'stone')
-        spec.update(self._faces(texture))
+        faces = self._faces(texture)
+        spec.update(faces)
         material = props.pop('sound', material or 'stone')
         spec.update(props)
         blocks.register_block(name, spec)
         sound.MATERIAL[name] = material
         self.blocks.append(name)
+        self.ops.append({'op': 'addblock', 'name': name, 'faces': {k: v[0] for k, v in faces.items()}, 'like': like,
+                         'props': recorded_props})
         _refresh()
         return name
 
@@ -238,6 +250,9 @@ class Mod:
         crafting.shaped(['X  ', 'XX ', 'XXX'], {'X': f'{wood}_planks'}, f'{wood}_stairs', 4)
         crafting.shaped(['PSP', 'PSP'], {'P': f'{wood}_planks', 'S': 'stick'}, f'{wood}_fence', 3)
         crafting.SMELTING[f'{wood}_log'] = 'charcoal'
+        self.ops.append({'op': 'addwood', 'color': list(rgb), 'leaves': (str(self._path(leaves, 'leaves picture'))
+                                                                         if leaves is not None else None),
+                         'name': wood, 'sapling': bool(sapling)})
         _refresh()
         return wood
 
@@ -258,6 +273,8 @@ class Mod:
         if hasattr(items, 'CREATIVE_ORDER'):
             items.CREATIVE_ORDER.append(name)
         self.items.append(name)
+        self.ops.append({'op': 'additem', 'name': name, 'texture': str(icon), 'food': int(food), 'saturation': float(saturation),
+                         'stack': int(stack), 'fuel': float(fuel), 'title': title})
         return name
 
     def _known(self, name):
@@ -272,6 +289,7 @@ class Mod:
             self._known(ingredient)
         self._known(result)
         crafting.shaped(list(rows), dict(key), result, count)
+        self.ops.append({'op': 'recipe', 'rows': list(rows), 'key': dict(key), 'result': result, 'count': int(count)})
 
     def shapeless(self, ingredients, result, count=1):
         """A recipe where only the ingredients matter, not their places: shapeless(['snad', 'vine'], 'snad_block')."""
@@ -279,12 +297,18 @@ class Mod:
             self._known(ingredient)
         self._known(result)
         crafting.shapeless(list(ingredients), result, count)
+        self.ops.append({'op': 'shapeless', 'ingredients': list(ingredients), 'result': result, 'count': int(count)})
 
     def smelt(self, source, result):
         """Cooking in a furnace: smelt('snad', 'glass')."""
         self._known(source)
         self._known(result)
         crafting.SMELTING[source] = result
+        self.ops.append({'op': 'smelt', 'source': source, 'result': result})
+
+    def mob(self, base, name=None):
+        """A new creature made from another, kept with this mod (so it is saved in the .pcmod): m.mob(pc.golem, 'vine_golem')."""
+        return MobBuilder(base, name, mod=self)
 
 
 def _fallback_color(rgb=None):
@@ -321,7 +345,7 @@ def mob_name_for(base):
 class MobBuilder:
     """A creature you are making: change it with .texture(), .health(), .speed()... (each returns the builder, so they chain)."""
 
-    def __init__(self, base, name=None, folder=None):
+    def __init__(self, base, name=None, folder=None, mod=None):
         base_name = mob_name_for(base)
         if name is None:
             _mob_counter[0] += 1
@@ -332,9 +356,14 @@ class MobBuilder:
         source = mobtypes.TYPES[base_name]
         self.kind = dataclasses.replace(source, name=name, title=name.replace('_', ' ').title(), base=source.base,
                                         textures=dict(source.textures), parts=list(source.parts), drops=list(source.drops))
-        self.folder = Path(folder) if folder else _caller_dir()
+        self.folder = Path(folder) if folder else (mod.folder if mod else _caller_dir())
         self._base_skin = source.textures.get('main')
         mobtypes.TYPES[name] = self.kind
+        self.base_name = base_name
+        self.calls, self.conditions = [], []         # kept so the creature can be saved in a .pcmod
+        mod = mod or (ACTIVE[-1] if ACTIVE else None)
+        if mod is not None:
+            mod.mobs.append(self)
 
     def __repr__(self):
         return f'<creature {self.kind.name!r} made from {self.kind.base!r}>'
@@ -346,6 +375,7 @@ class MobBuilder:
     def title(self, text):
         """The name people see."""
         self.kind.title = str(text)
+        self.calls.append(('title', [str(text)]))
         return self
 
     def texture(self, path):
@@ -365,19 +395,23 @@ class MobBuilder:
                                  f'bigger). Start from a copy: pycraft.export_skin({self.kind.base!r}, "skin.png").')
             self.kind.skin_scale = max(1.0, width / base_w) * (self.kind.skin_scale if width == base_w else 1.0)
         self.kind.textures['main'] = str(file)
+        self.calls.append(('texture', [str(file)]))
         return self
 
     def health(self, points):
         """Hit points (a player's heart is 2 points)."""
         self.kind.health = max(1, int(points))
+        self.calls.append(('health', [self.kind.health]))
         return self
 
     def speed(self, blocks_per_second):
         self.kind.speed = float(blocks_per_second)
+        self.calls.append(('speed', [self.kind.speed]))
         return self
 
     def attack(self, damage):
         self.kind.attack = float(damage)
+        self.calls.append(('attack', [self.kind.attack]))
         return self
 
     def scale(self, factor):
@@ -388,6 +422,7 @@ class MobBuilder:
         self.kind.scale *= factor
         self.kind.width *= factor
         self.kind.height *= factor
+        self.calls.append(('scale', [factor]))
         return self
 
     def drops(self, drops):
@@ -400,20 +435,24 @@ class MobBuilder:
                                  (f'There is no item {entry[0]!r}. Did you mean {", ".join(close)}?' if entry[0] not in items.ITEMS and close else ''))
             checked.append(tuple(entry))
         self.kind.drops = checked
+        self.calls.append(('drops', [[list(d) for d in checked]]))
         return self
 
     def hostile(self, yes=True):
         """Hostile creatures go after the player (and other creatures defend against them)."""
         self.kind.monster = bool(yes)
+        self.calls.append(('hostile', [bool(yes)]))
         return self
 
     def fire_immune(self, yes=True):
         self.kind.fire_immune = bool(yes)
+        self.calls.append(('fire_immune', [bool(yes)]))
         return self
 
     def sound(self, folder):
         """Use the noises of another creature (a folder in assets/sounds/mob like 'zombie')."""
         self.kind.sound = str(folder)
+        self.calls.append(('sound', [str(folder)]))
         return self
 
     def spawncondition(self, condition):
@@ -423,6 +462,7 @@ class MobBuilder:
             raise ValueError('A spawn condition comes from pc.block_placement(...), pc.near_block(...), pc.at_night(), pc.on_block(...) '
                              'or pc.anywhere().')
         SPAWN_RULES.append((self.kind.name, condition))
+        self.conditions.append(condition)
         return self
 
 
@@ -433,6 +473,20 @@ class Condition:
 
 
 class BlockPlacement(Condition):
+    def spec(self, add_file):
+        """The condition as plain data for a .pcmod (the pattern is stored in the mod file)."""
+        source = self.source
+        if isinstance(source, (str, os.PathLike)):
+            pattern = add_file(source, 'pcschem')
+        else:                                                       # a Clip or a Plot: write the shape out
+            import tempfile
+            cells = load_pattern(source)
+            with tempfile.NamedTemporaryFile(suffix='.pcschem', delete=False) as handle:
+                handle.write(json.dumps({'format': 'pcschem', 'version': 1, 'blocks': pcplot.pack_blocks(cells)}).encode())
+            pattern = add_file(handle.name, 'pcschem')
+            os.unlink(handle.name)
+        return {'type': 'block_placement', 'pattern': pattern, 'consume': self.consume, 'rotate': self.rotate}
+
     """Build the pattern (from a .pcschem file, a Clip or a Plot) anywhere and the blocks turn into the creature."""
 
     def __init__(self, source, consume=True, rotate=True):
@@ -530,6 +584,10 @@ def save_pattern(clip, path):
 class NearBlock(Condition):
     natural = True
 
+    def spec(self, add_file):
+        return {'type': 'near_block', 'block': sorted(self.blocks)[0] if len(self.blocks) == 1 else sorted(self.blocks),
+                'radius': self.radius, 'chance': self.chance, 'limit': self.limit}
+
     def __init__(self, block, radius=6, chance=0.15, limit=3):
         self.blocks = {block} if isinstance(block, str) else set(block)
         self.radius, self.chance, self.limit = int(radius), float(chance), int(limit)
@@ -543,6 +601,10 @@ class NearBlock(Condition):
 class OnBlock(Condition):
     natural = True
 
+    def spec(self, add_file):
+        return {'type': 'on_block', 'block': sorted(self.blocks)[0] if len(self.blocks) == 1 else sorted(self.blocks),
+                'chance': self.chance, 'limit': self.limit}
+
     def __init__(self, block, chance=0.1, limit=3):
         self.blocks = {block} if isinstance(block, str) else set(block)
         self.chance, self.limit = float(chance), int(limit)
@@ -554,6 +616,9 @@ class OnBlock(Condition):
 class AtNight(Condition):
     natural = True
 
+    def spec(self, add_file):
+        return {'type': 'at_night', 'chance': self.chance, 'limit': self.limit}
+
     def __init__(self, chance=0.15, limit=4):
         self.chance, self.limit = float(chance), int(limit)
 
@@ -564,6 +629,9 @@ class AtNight(Condition):
 
 class Anywhere(Condition):
     natural = True
+
+    def spec(self, add_file):
+        return {'type': 'anywhere', 'chance': self.chance, 'limit': self.limit}
 
     def __init__(self, chance=0.1, limit=4):
         self.chance, self.limit = float(chance), int(limit)
@@ -718,19 +786,337 @@ class ModRuntime:
                 break
 
 
+# ---- .pcmod files: a mod as one file you can hand in, share and install ---------------------------------------------------------
+#
+# A .pcmod is a zip with a mod.json (what the mod adds) and the pictures and patterns it uses (files/*.png, files/*.pcschem).
+# It holds data only: opening one never runs any code, so a teacher can safely open a student's mod.
+
+class ModFileError(ValueError):
+    """A .pcmod that cannot be used (and why)."""
+
+
+FORMAT_VERSION = 1
+MAX_FILES, MAX_OPS = 200, 1000
+MAX_PNG, MAX_JSON, MAX_TOTAL, MAX_PIXELS = 2_000_000, 400_000, 30_000_000, 512
+_ZIP_NAME = re.compile(r'files/[A-Za-z0-9_.-]{1,80}\.(png|pcschem)')
+_OP_KEYS = {
+    'addblock': {'op', 'name', 'faces', 'like', 'props'}, 'addwood': {'op', 'color', 'leaves', 'name', 'sapling'},
+    'additem': {'op', 'name', 'texture', 'food', 'saturation', 'stack', 'fuel', 'title'},
+    'recipe': {'op', 'rows', 'key', 'result', 'count'}, 'shapeless': {'op', 'ingredients', 'result', 'count'},
+    'smelt': {'op', 'source', 'result'}, 'mob': {'op', 'name', 'base', 'calls', 'conditions'},
+}
+_CALLS = {'texture', 'health', 'speed', 'attack', 'scale', 'drops', 'hostile', 'fire_immune', 'sound', 'title'}
+_CONDITIONS = {'block_placement': {'type', 'pattern', 'consume', 'rotate'}, 'near_block': {'type', 'block', 'radius', 'chance', 'limit'},
+               'on_block': {'type', 'block', 'chance', 'limit'}, 'at_night': {'type', 'chance', 'limit'},
+               'anywhere': {'type', 'chance', 'limit'}}
+
+
+def _clean(value, depth=0, where='mod.json'):
+    """Only plain data: text, numbers, true/false, nothing, lists and dictionaries (not too big, not too deep)."""
+    if depth > 8:
+        raise ModFileError(f'{where} is nested too deeply.')
+    if value is None or isinstance(value, (bool, int, float)):
+        return value
+    if isinstance(value, str):
+        if len(value) > 400:
+            raise ModFileError(f'{where} has a very long piece of text.')
+        return value
+    if isinstance(value, list):
+        if len(value) > 300:
+            raise ModFileError(f'{where} has a very long list.')
+        return [_clean(v, depth + 1, where) for v in value]
+    if isinstance(value, dict):
+        if len(value) > 300:
+            raise ModFileError(f'{where} has a very big table.')
+        return {_clean(k, depth + 1, where): _clean(v, depth + 1, where) for k, v in value.items() if isinstance(k, str)}
+    raise ModFileError(f'{where} has something that is not plain data.')
+
+
+def _file_ref(value, what):
+    if not (isinstance(value, dict) and set(value) == {'file'} and isinstance(value['file'], str) and _ZIP_NAME.fullmatch(value['file'])):
+        raise ModFileError(f'{what} must point to a picture file inside the mod.')
+    return value['file']
+
+
+def validate_spec(spec, names):
+    """Check mod.json (the parsed data) and the names of the files in the zip. Returns the cleaned spec."""
+    spec = _clean(spec)
+    if not isinstance(spec, dict) or spec.get('format') != 'pcmod':
+        raise ModFileError('This is not a PythonCraft mod file (mod.json does not say pcmod).')
+    if spec.get('version') != FORMAT_VERSION:
+        raise ModFileError(f'This mod file is version {spec.get("version")!r}; this game reads version {FORMAT_VERSION}.')
+    try:
+        _slug(spec.get('name'), 'mod name')
+    except ValueError as error:
+        raise ModFileError(str(error)) from None
+    ops = spec.get('ops')
+    if not isinstance(ops, list) or len(ops) > MAX_OPS:
+        raise ModFileError(f'A mod can have up to {MAX_OPS} steps.')
+    for number, op in enumerate(ops, start=1):
+        if not isinstance(op, dict) or op.get('op') not in _OP_KEYS:
+            raise ModFileError(f'Step {number} is not something a mod can do.')
+        extra = set(op) - _OP_KEYS[op['op']]
+        if extra:
+            raise ModFileError(f'Step {number} ({op["op"]}) has unknown parts: {", ".join(sorted(extra))}.')
+        refs = []
+        if op['op'] == 'addblock':
+            if not isinstance(op.get('faces'), dict) or not isinstance(op.get('props', {}), dict):
+                raise ModFileError(f'Step {number} (addblock) needs its pictures and options.')
+            refs = [(f'step {number} picture', v) for v in op['faces'].values()]
+        elif op['op'] == 'addwood' and op.get('leaves') is not None:
+            refs = [(f'step {number} leaves', op['leaves'])]
+        elif op['op'] == 'additem':
+            refs = [(f'step {number} picture', op.get('texture'))]
+        elif op['op'] == 'mob':
+            for call in op.get('calls', []):
+                if not (isinstance(call, list) and call and call[0] in _CALLS):
+                    raise ModFileError(f'Step {number} (creature) has a change that is not allowed.')
+                if call[0] == 'texture':
+                    refs.append((f'step {number} skin', call[1] if len(call) > 1 else None))
+            for cond in op.get('conditions', []):
+                if not (isinstance(cond, dict) and cond.get('type') in _CONDITIONS and set(cond) <= _CONDITIONS[cond['type']]):
+                    raise ModFileError(f'Step {number} (creature) has a spawn condition that is not allowed.')
+                if cond['type'] == 'block_placement':
+                    refs.append((f'step {number} pattern', cond.get('pattern')))
+        for what, ref in refs:
+            if _file_ref(ref, what)  not in names:
+                raise ModFileError(f'Step {number} uses a file that is not in the mod: {ref["file"]}.')
+    return spec
+
+
+def read_pcmod(path):
+    """Open and check a .pcmod without running anything. Returns (spec, {file name: bytes}, sha) or raises ModFileError."""
+    import hashlib
+    import json
+    import zipfile
+    path = Path(path)
+    try:
+        raw = path.read_bytes()
+    except OSError as error:
+        raise ModFileError(f'Could not read {str(path)!r}: {error}') from None
+    try:
+        archive = zipfile.ZipFile(path)
+    except (zipfile.BadZipFile, OSError):
+        raise ModFileError(f'{path.name} is not a mod file (it is not a zip).') from None
+    with archive:
+        infos = archive.infolist()
+        if len(infos) > MAX_FILES + 1:
+            raise ModFileError('This mod has too many files.')
+        total, files, spec_bytes = 0, {}, None
+        for info in infos:
+            name = info.filename
+            if name != 'mod.json' and not _ZIP_NAME.fullmatch(name):
+                raise ModFileError(f'This mod has a file that is not allowed: {name!r}. (Only mod.json, pictures and patterns.)')
+            limit = MAX_JSON if name == 'mod.json' else MAX_PNG
+            if info.file_size > limit or (info.compress_size and info.file_size / info.compress_size > 400):
+                raise ModFileError(f'{name!r} is too big.')
+            total += info.file_size
+            if total > MAX_TOTAL:
+                raise ModFileError('This mod is too big.')
+            data = archive.read(name)
+            if len(data) != info.file_size:
+                raise ModFileError(f'{name!r} is damaged.')
+            if name == 'mod.json':
+                spec_bytes = data
+            else:
+                files[name] = data
+    if spec_bytes is None:
+        raise ModFileError('There is no mod.json in this mod file.')
+    try:
+        spec = json.loads(spec_bytes.decode('utf-8'))
+    except ValueError:
+        raise ModFileError('mod.json cannot be read.') from None
+    spec = validate_spec(spec, set(files))
+    import io
+    for name, data in files.items():
+        if name.endswith('.png'):
+            try:
+                image = Image.open(io.BytesIO(data))
+                image.verify()
+                if image.format != 'PNG' or image.width > MAX_PIXELS or image.height > MAX_PIXELS:
+                    raise ValueError
+            except Exception:
+                raise ModFileError(f'{name!r} is not a PNG picture of a usable size (up to {MAX_PIXELS} pixels).') from None
+        else:
+            try:
+                pattern = json.loads(data.decode('utf-8'))
+                if pattern.get('format') != 'pcschem' or not isinstance(pattern.get('blocks'), dict):
+                    raise ValueError
+            except Exception:
+                raise ModFileError(f'{name!r} is not a pattern file.') from None
+    return spec, files, hashlib.sha256(raw).hexdigest()[:10]
+
+
+def describe(spec):
+    """What a mod adds, in words (for modtool.py info and for reviewing hand-ins)."""
+    lines = []
+    for op in spec['ops']:
+        kind = op['op']
+        if kind == 'addblock':
+            lines.append(f"block {op['name']}" + (f" (like {op['like']})" if op.get('like') else ''))
+        elif kind == 'addwood':
+            lines.append(f"wood {op['name']} (log, planks, leaves, sapling, slab, stairs, fence)")
+        elif kind == 'additem':
+            lines.append(f"item {op['name']}")
+        elif kind == 'mob':
+            when = ', '.join(c['type'] for c in op.get('conditions', [])) or 'only placed by hand'
+            lines.append(f"creature {op['name']} (made from {op['base']}; appears: {when})")
+        else:
+            lines.append(f'{kind} -> {op.get("result", "")}')
+    return lines
+
+
+def _condition_from(spec, folder):
+    kind = spec['type']
+    rest = {k: v for k, v in spec.items() if k not in ('type', 'pattern')}
+    if kind == 'block_placement':
+        return block_placement(str(folder / _file_ref(spec.get('pattern'), 'pattern')), bool(rest.get('consume', True)),
+                               bool(rest.get('rotate', True)))
+    return {'near_block': near_block, 'on_block': on_block, 'at_night': at_night, 'anywhere': anywhere}[kind](**rest)
+
+
+def load_pcmod(path, cache=None):
+    """Add what a .pcmod holds to the game. (Only data is read: no code in the file is ever run.) Returns the Mod."""
+    spec, files, sha = read_pcmod(path)
+    name = spec['name']
+    for existing in ACTIVE:
+        if getattr(existing, 'sha', None) == sha:
+            return existing                                         # (already loaded)
+    folder = Path(cache or os.environ.get('PYCRAFT_MODCACHE') or HERE / 'mods' / '.cache') / f'{name}-{sha}'
+    (folder / 'files').mkdir(parents=True, exist_ok=True)
+    for file_name, data in files.items():
+        (folder / file_name).write_bytes(data)
+    mod = Mod(name, folder=folder)
+    mod.sha, mod.title, mod.description = sha, str(spec.get('title') or ''), str(spec.get('description') or '')
+
+    def file(ref):
+        return str(folder / ref['file'])
+
+    for number, op in enumerate(spec['ops'], start=1):
+        try:
+            kind = op['op']
+            if kind == 'addblock':
+                faces = {k: file(v) for k, v in op['faces'].items()}
+                texture = faces['all'] if set(faces) == {'all'} else faces
+                mod.addblock(op['name'], texture, like=op.get('like'), **op.get('props', {}))
+            elif kind == 'addwood':
+                mod.addwood(tuple(op['color']), file(op['leaves']) if op.get('leaves') else None, name=op['name'],
+                            sapling=bool(op.get('sapling', True)))
+            elif kind == 'additem':
+                mod.additem(op['name'], file(op['texture']), food=op.get('food', 0), saturation=op.get('saturation', 0.0),
+                            stack=op.get('stack', 64), fuel=op.get('fuel', 0.0), title=op.get('title'))
+            elif kind == 'recipe':
+                mod.recipe(op['rows'], op['key'], op['result'], op.get('count', 1))
+            elif kind == 'shapeless':
+                mod.shapeless(op['ingredients'], op['result'], op.get('count', 1))
+            elif kind == 'smelt':
+                mod.smelt(op['source'], op['result'])
+            elif kind == 'mob':
+                builder = mod.mob(op['base'], op['name'])
+                for call in op.get('calls', []):
+                    method, args = call[0], call[1:]
+                    if method == 'texture':
+                        args = [file(args[0])]
+                    elif method == 'drops':
+                        args = [[tuple(d) for d in args[0]]]
+                    getattr(builder, method)(*args)
+                for cond in op.get('conditions', []):
+                    builder.spawncondition(_condition_from(cond, folder))
+        except (ValueError, TypeError, KeyError, IndexError) as error:
+            raise ModFileError(f'Step {number} of {Path(path).name} ({op.get("op")}) did not work: {error}') from None
+    return mod
+
+
+def _save_mod(mod, filename=None, title=None, description=''):
+    import hashlib
+    import io
+    import json
+    import zipfile
+    if not (mod.ops or mod.mobs):
+        raise ValueError('There is nothing in this mod to save yet. Add a block, wood, item or creature first.')
+    files = {}
+
+    def add_file(source, kind='png'):
+        if isinstance(source, Image.Image):
+            buffer = io.BytesIO()
+            source.save(buffer, 'PNG')
+            data = buffer.getvalue()
+        else:
+            data = Path(source).read_bytes()
+        name = f'files/{mod.name}-{hashlib.sha1(data).hexdigest()[:8]}.{kind}'
+        files[name] = data
+        return {'file': name}
+
+    ops = []
+    for op in mod.ops:
+        op = dict(op)
+        if op['op'] == 'addblock':
+            op['faces'] = {k: add_file(v) for k, v in op['faces'].items()}
+        elif op['op'] == 'addwood' and op.get('leaves'):
+            op['leaves'] = add_file(op['leaves'])
+        elif op['op'] == 'additem':
+            op['texture'] = add_file(op['texture'])
+        ops.append(op)
+    for builder in mod.mobs:
+        calls = []
+        for method, args in builder.calls:
+            calls.append([method] + ([add_file(args[0])] if method == 'texture' else list(args)))
+        conditions = []
+        for cond in builder.conditions:
+            spec = cond.spec(add_file)
+            conditions.append(spec)
+        ops.append({'op': 'mob', 'name': builder.kind.name, 'base': builder.base_name, 'calls': calls, 'conditions': conditions})
+    spec = {'format': 'pcmod', 'version': FORMAT_VERSION, 'name': mod.name, 'title': title or mod.title or mod.name,
+            'description': description or mod.description, 'ops': ops}
+    names = set(files)
+    validate_spec(json.loads(json.dumps(spec)), names)                  # (what we write must be something we would read)
+    target = Path(filename) if filename else Path.cwd() / f'{mod.name}.pcmod'
+    if target.suffix != '.pcmod':
+        target = target.with_suffix('.pcmod')
+    target.parent.mkdir(parents=True, exist_ok=True)
+    with zipfile.ZipFile(target, 'w', zipfile.ZIP_DEFLATED) as archive:
+        archive.writestr('mod.json', json.dumps(spec, indent=1))
+        for name, data in files.items():
+            archive.writestr(name, data)
+    return str(target)
+
+
+def _submit_mod(mod, name=None, to=None, note=None):
+    """Hand the mod in for review: submissions/mods/<your name>/<mod>.pcmod (your teacher opens it with modtool.py review)."""
+    import pcplot as _pc
+    import pycraft
+    who = name or os.environ.get('PYCRAFT_NAME')
+    if not who and sys.stdin is not None and sys.stdin.isatty():
+        who = input('Your name: ').strip()
+    if not who:
+        raise ValueError("Say who you are: m.submit('Sam'). (Or set PYCRAFT_NAME once.)")
+    folder = Path(_pc.submissions_folder(to, pycraft._START_DIR)) / 'mods' / _pc.slug(who)
+    path = _save_mod(mod, folder / f'{mod.name}.pcmod', description=note or '')
+    print(f'Handed in: {path}\n  Your teacher can look at it with:  python3 modtool.py review')
+    return path
+
+
+Mod.save = _save_mod
+Mod.submit = _submit_mod
+Mod.sha = None
+
+
 # ---- the game's own mods folder ----------------------------------------------------------------------------------------------------
 
 def load_folder(folder=None):
-    """Run every mod file (*.py, not starting with _ or .) in the mods folder. Returns the names that loaded."""
+    """Load every mod in the mods folder: *.pcmod files (data) and *.py programs. Returns the names that loaded."""
     folder = Path(folder) if folder else HERE / 'mods'
     loaded = []
     if not folder.is_dir():
         return loaded
-    for path in sorted(folder.glob('*.py')):
+    for path in sorted(list(folder.glob('*.py')) + list(folder.glob('*.pcmod'))):
         if path.name.startswith(('_', '.')):
             continue
         try:
-            runpy.run_path(str(path), run_name='__mod__')
+            if path.suffix == '.pcmod':
+                load_pcmod(path)                                    # (data only: nothing in the file is run)
+            else:
+                runpy.run_path(str(path), run_name='__mod__')
             loaded.append(path.stem)
         except Exception as error:                                  # one broken mod must not stop the game
             print(f'Mod {path.name} could not load: {type(error).__name__}: {error}')

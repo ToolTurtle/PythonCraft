@@ -2047,11 +2047,18 @@ def mod(name='mod'):
     return mods.Mod(name)
 
 
-def mob(base, name=None):
+def mob(base, name=None, mod=None):
     """A new creature made from an old one: golem = pc.mob(pc.golem, 'vine_golem'). Then .texture('skin.png'),
-    .health(60), .spawncondition(pc.block_placement('shape.pcschem'))... See moblist() for the creatures."""
+    .health(60), .spawncondition(pc.block_placement('shape.pcschem'))... See moblist() for the creatures.
+    It belongs to the latest pc.mod() (or to mod=m), so m.save() keeps it."""
     import mods
-    return mods.MobBuilder(base, name)
+    return mods.MobBuilder(base, name, mod=mod)
+
+
+def loadmod(filename):
+    """Add the blocks, wood, items and creatures of a .pcmod file (made with m.save('name.pcmod'))."""
+    import mods
+    return mods.load_pcmod(_userpath(filename))
 
 
 def block_placement(pattern, consume=True, rotate=True):
@@ -2126,4 +2133,4 @@ def __getattr__(name):
 __all__ = ['plot', 'challenge', 'feedback', 'load', 'view', 'Challenge', 'require', 'level', 'solution', 'runplot', 'live', 'wait', 'running', 'adventure', 'spectator', 'Plot', 'Clip',
            'Creature', 'Turtle', 'BLOCKS', 'blocklist', 'blockid', 'moblist', 'noise', 'levels', 'progress',
            'reset_progress', 'challenges', 'makegallery', 'rotate', 'mirror', 'mod', 'mob', 'block_placement', 'near_block',
-           'on_block', 'at_night', 'anywhere', 'export_skin', 'export_texture', 'schematic', 'paint']
+           'on_block', 'at_night', 'anywhere', 'export_skin', 'export_texture', 'schematic', 'paint', 'loadmod']
