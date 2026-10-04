@@ -1,0 +1,23 @@
+# the player's own worlds and work: never part of the project
+saves/
+drafts/
+submissions/
+reviews/
+feedback/
+pycraft_progress.json
+pictures/
+
+# Python
+__pycache__/
+*.pyc
+
+# a mod's unpacked files, and scratch
+mods/.cache/
+*.tmp
+
+# Minecraft's own pictures and sounds belong to Mojang/Microsoft: not ours to share (see NOTICE)
+assets/
+minecraft-assets-*/
+
+# another repository that lives in this folder
+/PythonCraft/

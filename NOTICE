@@ -1,0 +1,10 @@
+PythonCraft is a classroom project and is not made by, or connected to, Mojang Studios or Microsoft.
+"Minecraft" is a trademark of Mojang Synergies AB.
+
+The MIT License in the file LICENSE covers the code, documentation, examples, challenges and tutorial
+worlds in this project.
+
+It does NOT cover the folder assets/ (block and creature pictures, sounds), which comes from the game
+Minecraft and belongs to Mojang Studios / Microsoft. It is left out of the git repository on purpose.
+To run the game you need your own copy of those files in assets/ (taken from a copy of the game you own);
+do not publish or redistribute them. Pictures and files that you make yourself for mods are yours.
