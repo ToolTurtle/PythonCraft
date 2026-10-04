@@ -339,3 +339,43 @@ class ModsOnOffer(unittest.TestCase):
 
 if __name__ == '__main__':
     unittest.main()
+
+
+class Animals(Base):
+    def entry(self, ident=1, kind='pig', x=5.0):
+        return [ident, kind, x, 4.0, 3.0, 90.0, 1, 10]
+
+    def test_only_the_world_runner_can_place_animals_and_others_see_them(self):
+        ann, bo = self.join('Ann'), self.join('Bo')
+        self.assertTrue(wait_for(ann, 'authority')['on'])
+        ann.send_mobs([self.entry(1, 'pig'), self.entry(2, 'cow')])
+        message = wait_for(bo, 'mobs')
+        self.assertEqual([e[1] for e in message['c']], ['pig', 'cow'])
+        bo.send_mobs([self.entry(9, 'zombie')])                                  # (Bo does not run the world)
+        self.assertIsNone(wait_for(ann, 'mobs', timeout=0.4))
+
+    def test_bad_animals_are_refused(self):
+        ann, bo = self.join('Ann'), self.join('Bo')
+        for bad in ([[1, 'not_a_mob', 0, 0, 0, 0, 0, 1]], [[1, 'pig', 'x', 0, 0, 0, 0, 1]], [[1, 'pig', 0, 0, 0]], [self.entry()] * 300):
+            ann.send_mobs(bad)
+        self.assertIsNone(wait_for(bo, 'mobs', timeout=0.5))
+
+    def test_a_hit_goes_to_the_world_runner_and_loot_comes_back(self):
+        ann, bo = self.join('Ann'), self.join('Bo', mode='survival', at=(1.0, 4.0, 1.0))
+        bo.send_mobhit(7, 4.5)
+        hit = wait_for(ann, 'mobhit')
+        self.assertEqual((hit['by'], hit['id'], hit['dmg']), (bo.id, 7, 4.5))
+        ann.send_loot(bo.id, 'porkchop', 2)
+        self.assertEqual(wait_for(bo, 'loot')['name'], 'porkchop')
+        ann.send_loot(bo.id, 'not_an_item', 1)
+        ann.send_loot(bo.id, 'diamond', 9999)
+        self.assertIsNone(wait_for(bo, 'loot', timeout=0.5))
+        bo.send_loot(ann.id, 'diamond', 1)                                       # (only the world runner hands out loot)
+        self.assertIsNone(wait_for(ann, 'loot', timeout=0.4))
+
+    def test_frozen_and_spectating_players_cannot_hit(self):
+        teacher, ann, bo = self.join('Tea', teacher=True), self.join('Ann'), self.join('Bo')
+        self.say(teacher, '/mode spectator Bo')
+        time.sleep(0.2)
+        bo.send_mobhit(1, 5)
+        self.assertIsNone(wait_for(ann, 'mobhit', timeout=0.4))

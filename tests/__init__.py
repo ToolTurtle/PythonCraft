@@ -8,7 +8,8 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 SCRATCH = Path(tempfile.mkdtemp(prefix='pythoncraft_tests_'))
-for name, folder in (('PYTHONCRAFT_SAVES', 'saves'), ('PYCRAFT_MODCACHE', 'modcache'), ('PYCRAFT_SUBMISSIONS', 'submissions')):
+for name, folder in (('PYTHONCRAFT_SAVES', 'saves'), ('PYCRAFT_MODCACHE', 'modcache'), ('PYCRAFT_SUBMISSIONS', 'submissions'),
+                     ('PYCRAFT_LANWORLDS', 'lanworlds'), ('PYCRAFT_CLASSES', 'classes')):
     os.environ[name] = str(SCRATCH / folder)
 os.environ['PYCRAFTWORLD_PROGRESS'] = str(SCRATCH / 'progress.json')
 os.environ['PYCRAFT_NAME'] = 'Tester'

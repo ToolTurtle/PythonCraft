@@ -96,7 +96,7 @@ Add your own blocks, wood and creatures with `pc.mod()` and `pc.mob()`: see docs
 Every command on one page: docs/COMMANDS.md (press / in a live-coding game to type them).
 
 ## Playing together
-`python3 lan.py host` starts a classroom server (local network only) and `python3 lan.py join` joins one. Anyone can be the teacher with `/teacher PIN`: see docs/README_lan.md.
+`python3 launcher.py` opens one window for everything. Classroom worlds on the local network: teachers use the class tool (`python3 classtool.py`) or `python3 lan.py host`, students use `python3 lan.py join`; anyone can be the teacher with `/teacher PIN`. Plots, building with code, a teacher panel, rolling back changes, shared animals and more: see docs/README_lan.md. If something will not connect: `python3 doctor.py`.
 
 ## Tests
 `python3 run_tests.py` runs the checks (add `-v` to see each one; `PYCRAFT_NO_WINDOW=1` skips the ones that open the game).

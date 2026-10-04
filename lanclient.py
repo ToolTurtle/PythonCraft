@@ -197,6 +197,16 @@ class LanClient:
         for start in range(0, len(changes), proto.MAX_BLOCKS_PER_MESSAGE * 4):
             self.send({'t': 'sim', 'c': [list(c) for c in changes[start:start + proto.MAX_BLOCKS_PER_MESSAGE * 4]]})
 
+    def send_mobs(self, entries):
+        """(only the computer that runs the world) where the animals are: [[id, kind, x, y, z, yaw, moving, health], ...]"""
+        self.send({'t': 'mobs', 'c': entries})
+
+    def send_mobhit(self, ident, damage):
+        self.send({'t': 'mobhit', 'id': ident, 'dmg': damage})
+
+    def send_loot(self, to, name, count):
+        self.send({'t': 'loot', 'to': to, 'name': name, 'count': count})
+
     def send_chest(self, x, y, z, items):
         self.send({'t': 'chest', 'x': x, 'y': y, 'z': z, 'items': items})
 

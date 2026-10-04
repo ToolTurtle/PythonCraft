@@ -83,6 +83,38 @@ def make_remote_class():
     return RemotePlayer
 
 
+def make_puppet_class():
+    """An animal that is run on another player's computer: it stands where it is told and a hit on it is sent there."""
+    from mobs import Mob
+
+    class PuppetMob(Mob):
+        def __init__(self, manager, kind, entry, hit):
+            super().__init__(manager, kind, (entry[2], entry[3], entry[4]))
+            self.net_id, self.send_hit = entry[0], hit
+            self.goal, self.goal_yaw, self.walking_now = (entry[2], entry[3], entry[4]), entry[5], False
+            self.rotation_y = entry[5]
+            self.script_click = lambda: manager.player and None            # (feeding and trading are not shared yet)
+
+        def update(self):
+            dt = 1 / 20
+            gx, gy, gz = self.goal
+            blend = min(1.0, dt * 8)
+            self.moving = self.walking_now
+            self.wish_speed = 1.5
+            self.position = (self.x + (gx - self.x) * blend, self.y + (gy - self.y) * blend, self.z + (gz - self.z) * blend)
+            turn = (self.goal_yaw - self.rotation_y + 180) % 360 - 180
+            self.rotation_y += turn * blend
+            self.flash = max(0.0, self.flash - dt)
+            self.target = None
+            self._animate(dt)
+
+        def hurt(self, from_position, damage=1):
+            self.flash = 0.3                                              # (it flashes red now; the real one decides what happens)
+            self.send_hit(self.net_id, damage)
+
+    return PuppetMob
+
+
 class Chat:
     """The chat lines at the bottom left, and the line you type into."""
 
@@ -360,6 +392,9 @@ def play(host, port, code, name, screenshot=None, seconds=6, hook=None):
         remotes[entry['id']] = Remote(game.mobs, entry)
         game.mobs.mobs.append(remotes[entry['id']])
     chat.add(f"You joined {info['server']} as {client.name}. Press T to chat, C for code, /help for commands.")
+    pin = os.environ.pop('PYCRAFT_TEACHER_PIN', None)            # (set by the class window: join the game already as a teacher)
+    if pin:
+        client.chat(f'/teacher {pin}')
 
     # ---- sending what you do: blocks you place or break, blocks your code builds, and (for one player) what the world does ---------
     capture = {'on': False, 'touched': {}}
@@ -453,6 +488,83 @@ def play(host, port, code, name, screenshot=None, seconds=6, hook=None):
         if not on and game.falling.check in world.listeners:
             world.listeners.remove(game.falling.check)
         state['simbuf'].clear()
+        for mob in (list(animals['puppets'].values()) if on else real_mobs()):      # (animals are now yours to run, or somebody else's)
+            game.mobs.remove(mob)
+        animals['puppets'].clear()
+        animals['ids'].clear()
+
+    Puppet = make_puppet_class()
+    animals = {'puppets': {}, 'ids': {}, 'next': 1, 'killer': None, 'spawn_timer': 2.0, 'snap_timer': 0.0}
+    real_drop = game.dropped.drop
+
+    def drop_proxy(stack, position, *args, **kwargs):
+        if animals['killer'] is not None:                                 # (what an animal dropped goes to the player who killed it)
+            client.send_loot(animals['killer'], stack.name, stack.count)
+            return None
+        return real_drop(stack, position, *args, **kwargs)
+
+    game.dropped.drop = drop_proxy
+
+    def real_mobs():
+        return [m for m in game.mobs.mobs if not isinstance(m, (Remote, Puppet))]
+
+    def everyone():
+        return [(game.player.x, game.player.z)] + [(r.x, r.z) for r in remotes.values()]
+
+    def run_animals(dt):
+        """(only the computer that runs the world) animals appear near every player, and what they do goes to everybody."""
+        import random
+        animals['spawn_timer'] -= dt
+        if animals['spawn_timer'] <= 0:
+            animals['spawn_timer'] = 4.0
+            where = everyone()
+            for px, pz in where:
+                near = sum(1 for m in real_mobs() if math.hypot(m.x - px, m.z - pz) < 70)
+                if near < 8:
+                    for _ in range(8):                                     # (not every spot is grass in the open: try a few)
+                        angle, distance = random.uniform(0, 2 * math.pi), random.uniform(14, 44)
+                        if game.mobs._try_spawn_animal(int(px + math.cos(angle) * distance), int(pz + math.sin(angle) * distance)):
+                            break
+            for mob in real_mobs():                                        # (ones left far behind everybody go away)
+                if all(math.hypot(mob.x - px, mob.z - pz) > 120 for px, pz in where):
+                    game.mobs.remove(mob)
+        animals['snap_timer'] -= dt
+        if animals['snap_timer'] <= 0:
+            animals['snap_timer'] = 0.2
+            entries, animals['ids'] = [], {}
+            for mob in real_mobs()[:200]:
+                if not hasattr(mob, 'net_id'):
+                    mob.net_id, animals['next'] = animals['next'], animals['next'] + 1
+                animals['ids'][mob.net_id] = mob
+                entries.append([mob.net_id, mob.kind.name, round(mob.x, 2), round(mob.y, 2), round(mob.z, 2), round(mob.rotation_y, 0),
+                                1 if mob.moving else 0, max(0, round(mob.health))])
+            client.send_mobs(entries)
+
+    def show_animals(entries):
+        """(everybody else) show the animals the world runner sent; the ones it no longer lists go away."""
+        from mobtypes import TYPES
+        seen = set()
+        for entry in entries:
+            ident = entry[0]
+            seen.add(ident)
+            puppet = animals['puppets'].get(ident)
+            if puppet is None and entry[1] in TYPES:
+                puppet = Puppet(game.mobs, TYPES[entry[1]], entry, client.send_mobhit)
+                animals['puppets'][ident] = puppet
+                game.mobs.mobs.append(puppet)
+            if puppet is not None:
+                puppet.goal, puppet.goal_yaw, puppet.walking_now = (entry[2], entry[3], entry[4]), entry[5], bool(entry[6])
+        for ident in [i for i in animals['puppets'] if i not in seen]:
+            game.mobs.remove(animals['puppets'].pop(ident))
+
+    def hit_animal(message):
+        mob = animals['ids'].get(message['id'])
+        if mob is not None and mob in game.mobs.mobs and mob.health > 0:
+            animals['killer'] = message['by']
+            try:
+                mob.hurt(tuple(message['pos']), damage=message['dmg'])
+            finally:
+                animals['killer'] = None
 
     set_authority(False)
 
@@ -618,6 +730,15 @@ def play(host, port, code, name, screenshot=None, seconds=6, hook=None):
             set_authority(bool(message.get('on')))
         elif kind == 'chest':
             chest_to_world(message['x'], message['y'], message['z'], message['items'])
+        elif kind == 'mobs':
+            if not state['authority']:
+                show_animals(message['c'])
+        elif kind == 'mobhit':
+            if state['authority']:
+                hit_animal(message)
+        elif kind == 'loot':
+            game.inventory.add(message['name'], message['count'])
+            chat.add(f"You got {message['count']} {message['name'].replace('_', ' ')}.")
         elif kind == 'closed' or kind == 'kick':
             game.message(message.get('m', 'Disconnected.'), 8)
             chat.add(message.get('m', 'Disconnected.'))
@@ -636,6 +757,7 @@ def play(host, port, code, name, screenshot=None, seconds=6, hook=None):
             session.plot._run_queue(dt)                       # (what your code builds, a few blocks each frame)
         if state['authority']:
             flush_sim()
+            run_animals(dt)
         # following a student: stand behind them and look where they look
         if state['follow'] in remotes:
             remote = remotes[state['follow']]

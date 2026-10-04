@@ -123,6 +123,72 @@ server.stop()
 '''
 
 
+ANIMAL_SCRIPT = '''
+import sys, time, threading
+sys.path.insert(0, {root!r})
+from classlayout import Layout
+from lanserver import LanServer, WorldState
+from lanclient import LanClient
+
+layout = Layout.grid(2, 1, width=16, depth=16, gap=5)
+world = WorldState(0, 'Class', list(layout.spawn), {{pos: (name, None) for pos, name in layout.marker_blocks().items()}}, layout)
+server = LanServer(world, pin='teach1', code='maple-tiger-42', host='127.0.0.1', port=0).start()
+
+def ann():
+    for _ in range(100):
+        time.sleep(0.1)
+        if any(p.name == 'Sam' and p.pos is not None for p in server.players.values()):
+            break
+    c = LanClient('127.0.0.1', server.port, 'maple-tiger-42', 'Ann')
+    c.connect()
+    c.send_pos(layout.spawn[0], layout.spawn[1], layout.spawn[2], 0, 0)
+    victim, seen = None, False
+    end = time.time() + 40
+    while time.time() < end and not c.closed:
+        for e in c.poll():
+            if e['t'] == 'mobs':
+                ids = [m[0] for m in e['c']]
+                if victim is None and ids:
+                    seen = True
+                    print('ANIMALS_SEEN', len(ids), sorted({{m[1] for m in e['c']}}), flush=True)
+                    victim = ids[0]
+                    c.send_mobhit(victim, 20)
+                elif victim is not None and victim not in ids:
+                    print('KILLED', True, flush=True)
+                    return
+        time.sleep(0.05)
+    print('KILLED', False, 'seen', seen, flush=True)
+
+threading.Thread(target=ann, daemon=True).start()
+import lanplay
+lanplay.play('127.0.0.1', server.port, 'maple-tiger-42', 'Sam', seconds=40, hook=lambda *a: None)
+'''
+
+
+@unittest.skipIf(os.environ.get('PYCRAFT_NO_WINDOW'), 'PYCRAFT_NO_WINDOW is set')
+class Animals(unittest.TestCase):
+    def test_animals_run_on_one_computer_and_everyone_sees_and_hits_them(self):
+        folder = scratch('lan_animals')
+        script = folder / 'run.py'
+        script.write_text(ANIMAL_SCRIPT.format(root=str(ROOT)))
+        # (the game quits when the other player is done: no need to wait out the whole run)
+        process = subprocess.Popen([sys.executable, str(script)], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, cwd=str(ROOT))
+        lines, import_time = [], __import__('time').time()
+        try:
+            for line in process.stdout:
+                lines.append(line)
+                if line.startswith('KILLED'):
+                    break
+                if __import__('time').time() - import_time > 120:
+                    break
+        finally:
+            process.kill()
+            process.wait()
+        text = ''.join(lines)
+        self.assertIn('ANIMALS_SEEN', text, text[-500:])                    # animals appeared and were sent to the other player
+        self.assertIn('KILLED True', text, text[-500:])                     # a hit from the other player killed one on the runner's computer
+
+
 @unittest.skipIf(os.environ.get('PYCRAFT_NO_WINDOW'), 'PYCRAFT_NO_WINDOW is set')
 class ClassWorld(unittest.TestCase):
     def test_plots_code_sand_chests_and_the_panel(self):

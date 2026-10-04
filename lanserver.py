@@ -97,6 +97,7 @@ class Conn:
         self.code_log = collections.deque(maxlen=20)      # (time, what they typed in the code prompt)
         self.msg_bucket, self.pos_bucket = Bucket(120, 240), Bucket(40, 60)
         self.block_bucket, self.chat_bucket = Bucket(300, 600), Bucket(1.0, 5)
+        self.hit_bucket = Bucket(8, 16)
 
     def info(self):
         x, y, z = self.pos or (0, 0, 0)
@@ -121,7 +122,9 @@ class LanServer:
         self.known_blocks = set(known_blocks) if known_blocks is not None else set(blocks.BLOCKS)
         self.blocks_hash = proto.blocks_hash(known_blocks if known_blocks is not None else list(blocks.BLOCKS))
         import items as _items
+        import mobtypes
         self.known_items = set(_items.ITEMS)
+        self.known_mobs = set(mobtypes.TYPES)
         self.name = name
         self.players = {}                                 # id -> Conn
         self.next_id = 1
@@ -485,6 +488,12 @@ class LanServer:
             self._sim(conn, message)
         elif kind == 'chat':
             self._chat(conn, proto.clean_chat(message.get('m', '')))
+        elif kind == 'mobs':
+            self._mobs(conn, message)
+        elif kind == 'mobhit':
+            self._mobhit(conn, message)
+        elif kind == 'loot':
+            self._loot(conn, message)
         elif kind == 'chest':
             self._chest(conn, message)
         elif kind == 'code':
@@ -601,6 +610,41 @@ class LanServer:
         if accepted:
             self.world.dirty = True
             self.broadcast({'t': 'blocks', 'by': 0, 'sim': True, 'c': accepted}, skip=conn)
+
+    def _mobs(self, conn, message):
+        """The computer that runs the world says where the animals are (nobody else may); everybody else shows them."""
+        if conn.id != self.authority:
+            raise ProtocolError('not the one running the world')
+        entries = message.get('c')
+        if not isinstance(entries, list) or len(entries) > 200:
+            raise ProtocolError('too many creatures')
+        clean = []
+        for entry in entries:
+            if not isinstance(entry, (list, tuple)) or len(entry) != 8 or not isinstance(entry[1], str) or entry[1] not in self.known_mobs:
+                raise ProtocolError('bad creature')
+            clean.append([proto.number(entry[0], 0, 10 ** 9, integer=True), entry[1], proto.number(entry[2]), proto.number(entry[3], -64, 1000),
+                          proto.number(entry[4]), proto.number(entry[5], -100000, 100000), 1 if entry[6] else 0,
+                          proto.number(entry[7], 0, 5000)])
+        self.broadcast({'t': 'mobs', 'c': clean}, skip=conn)
+
+    def _mobhit(self, conn, message):
+        """A player hit a creature that the authority runs: pass it to the authority (who works out what happens)."""
+        if not conn.hit_bucket.take() or conn.frozen or conn.mode == 'spectator' or conn.pos is None:
+            return
+        ident, damage = proto.number(message.get('id'), 0, 10 ** 9, integer=True), proto.number(message.get('dmg'), 0, 30)
+        authority = self.players.get(self.authority)
+        if authority is not None and authority is not conn:
+            self.send(authority, {'t': 'mobhit', 'by': conn.id, 'id': ident, 'dmg': damage, 'pos': list(conn.pos)})
+
+    def _loot(self, conn, message):
+        """What a creature dropped goes straight to the player who killed it."""
+        if conn.id != self.authority:
+            raise ProtocolError('not the one running the world')
+        target = self.players.get(proto.number(message.get('to'), 0, 10 ** 9, integer=True))
+        name = message.get('name')
+        if target is None or not isinstance(name, str) or name not in self.known_items:
+            return
+        self.send(target, {'t': 'loot', 'name': name, 'count': proto.number(message.get('count', 1), 1, 64, integer=True)})
 
     def _chest(self, conn, message):
         pos = (proto.number(message.get('x'), integer=True), proto.number(message.get('y'), 0, proto.HEIGHT - 1, integer=True),
@@ -997,6 +1041,15 @@ class LanServer:
         return [f'Plot {plot.id} is free again (it was {old}\'s).']
 
     # ---- the person running the server ---------------------------------------------------------------------------------------------------
+
+    def snapshot(self):
+        """The class as it is now, for a window that shows it (safe to call from another thread)."""
+        return asyncio.run_coroutine_threadsafe(self._snapshot(), self.loop).result(3)
+
+    async def _snapshot(self):
+        layout = self.world.layout
+        return {'roster': self.roster(), 'locked': self.building_locked, 'chat': not self.chat_locked, 'log': list(self.log_lines[-40:]),
+                'plots': [p.to_json() for p in layout.plots] if layout else [], 'code': self.code, 'pin': self.pin, 'port': self.port}
 
     def operator(self, line):
         """A command typed on the server's own keyboard (it always has teacher powers). Returns the answer lines."""

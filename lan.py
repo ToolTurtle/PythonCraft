@@ -3,6 +3,7 @@
     python3 lan.py host                       start a class server with a new world (prints the room code and the teacher PIN)
     python3 lan.py host --world NAME          ... from one of your saved worlds (a copy: your save is never changed)
     python3 lan.py host --plot my.pcplot      ... from a pycraft plot or a tutorial world
+    python3 lan.py host --class math4.pcclass ... from a class setup with a plot for every student (made with classtool.py)
     python3 lan.py host --play Ms-Lee         ... and also play in it on this computer
     python3 lan.py join                       look for a class server on this network and join it
     python3 lan.py join 192.168.1.23 maple-tiger-42 --name Sam
@@ -45,9 +46,23 @@ def local_ips():
     return found or ['127.0.0.1']
 
 
+def world_path(name):
+    """Where the server keeps the class world with this name."""
+    import pcplot
+    return LANWORLDS / f'{pcplot.slug(name, "class")}.lanworld.json'
+
+
 def make_world(args):
     """The world the server starts from, and where its changes are kept."""
     from lanserver import WorldState
+    if getattr(args, 'class_file', None):
+        from classworld import ClassSetup
+        setup = ClassSetup.load(args.class_file)
+        target = world_path(setup.name)
+        args.mode = args.mode or setup.mode
+        if target.exists() and not args.fresh:
+            return WorldState.load(target), target                # (the class world as it was left)
+        return setup.build_world(), target
     if args.plot:
         import pycraft
         plot = pycraft.load(args.plot)
@@ -73,20 +88,43 @@ def make_world(args):
     return WorldState(seed, f'Class world {seed}'), target
 
 
-def host(args):
+def load_badwords(path=None):
+    """The words the chat filter stars out: one per line in badwords.txt (or the file you give). Lines starting with # are notes."""
+    file = Path(path) if path else HERE / 'badwords.txt'
+    if not file.is_file():
+        return []
+    return [line.strip() for line in file.read_text(encoding='utf-8', errors='replace').splitlines() if line.strip() and not line.startswith('#')]
+
+
+def start_server(args):
+    """Start a class server from the command-line options. Returns (server, where its world is kept)."""
     from lanserver import LanServer
     world, save_path = make_world(args)
     import mods
     mods.load_folder()                                            # (the mods everyone needs: players must have the same ones)
-    server = LanServer(world, pin=args.pin, code=args.code, host=args.bind, port=args.port, default_mode=args.mode,
-                       max_players=args.max, save_path=save_path, name=args.name).start()
+    mode = args.mode or 'adventure'
+    server = LanServer(world, pin=args.pin, code=args.code, host=args.bind, port=args.port, default_mode=mode, max_players=args.max,
+                       save_path=save_path, name=args.name, mods_dir=HERE / 'mods', chat_log=save_path.with_suffix('').with_suffix('.chat.log'),
+                       badwords=load_badwords(getattr(args, 'badwords', None))).start()
+    return server, save_path
+
+
+def host(args):
+    server, save_path = start_server(args)
+    world = server.world
     print(f'\nClass server "{args.name}" is running ({world.title}).')
     for address in local_ips():
         print(f'  Join with:   python3 lan.py join {address} {server.code} --name YOURNAME      (or just: python3 lan.py join)')
     print(f'  Room code:   {server.code}')
     print(f'  Teacher PIN: {server.pin}      (a teacher types  /teacher {server.pin}  in the game; keep the PIN to yourselves)')
-    print(f'  New players start in {args.mode} mode. The world is kept in {save_path}.')
-    print('Type commands here (mode creative all, list, say Hello, lock...). Ctrl+C stops the server.\n')
+    print(f'  New players start in {server.default_mode} mode. The world is kept in {save_path}.')
+    print(f'  What students say is written to {server.chat_log} (only on this computer).')
+    if world.layout and world.layout.plots:
+        print(f'  {len(world.layout.plots)} student plots: ' + ', '.join(f"{p.id}={p.owner or 'free'}" for p in world.layout.plots[:12])
+              + (' ...' if len(world.layout.plots) > 12 else ''))
+    if server.mods:
+        print('  Mods players can download from here: ' + ', '.join(m['name'] for m in server.mods))
+    print('Type commands here (mode creative all, list, say Hello, lock, history, undo Sam 5m...). Ctrl+C stops the server.\n')
 
     def console():
         while True:
@@ -119,7 +157,7 @@ def host(args):
 
 def join(args):
     import lanclient
-    host_name, code = args.host, args.code
+    host_name, code = args.host, args.room or args.code
     if not host_name:
         print('Looking for a class server on this network...')
         found = lanclient.find_servers()
@@ -160,11 +198,13 @@ def main(argv=None):
     h = sub.add_parser('host', help='start a class server')
     h.add_argument('--world', help='start from a saved world (it is copied: your save is never changed)')
     h.add_argument('--plot', help='start from a .pcplot (a pycraft plot or tutorial world)')
+    h.add_argument('--class', dest='class_file', metavar='FILE', help='start from a class setup (.pcclass) made with classtool.py: plots for every student')
+    h.add_argument('--badwords', metavar='FILE', help='words the chat filter stars out (default: badwords.txt)')
     h.add_argument('--seed', type=int, help='the seed of a new world')
     h.add_argument('--fresh', action='store_true', help='ignore the class world kept from last time')
     h.add_argument('--pin', help='the teacher PIN (at least 4 characters; made up for you if you leave it out)')
     h.add_argument('--code', help='the room code (made up for you if you leave it out)')
-    h.add_argument('--mode', default='adventure', choices=proto.MODES, help='the game mode new players start in (default adventure)')
+    h.add_argument('--mode', choices=proto.MODES, help='the game mode new players start in (default: the class file\'s, else adventure)')
     h.add_argument('--port', type=int, default=proto.DEFAULT_PORT)
     h.add_argument('--bind', default='0.0.0.0', help='the address to listen on (default: this computer\'s network)')
     h.add_argument('--max', type=int, default=40, help='how many players at most')
@@ -173,12 +213,15 @@ def main(argv=None):
     j = sub.add_parser('join', help='join a class server')
     j.add_argument('host', nargs='?', help='its address (leave out to look for it)')
     j.add_argument('code', nargs='?', help='the room code')
+    j.add_argument('--code', dest='room', help='the room code (the same as the second word, for when you leave the address out)')
     j.add_argument('--name', help='your name in the game')
     j.add_argument('--port', type=int, default=proto.DEFAULT_PORT)
     sub.add_parser('find', help='list the class servers on this network')
     args = parser.parse_args(argv)
     if getattr(args, 'plot', None):
-        args.plot = os.path.abspath(args.plot)                    # (the game must run from its own folder: find your file first)
+        args.plot = os.path.abspath(args.plot)
+    if getattr(args, 'class_file', None):
+        args.class_file = os.path.abspath(args.class_file)                    # (the game must run from its own folder: find your file first)
     os.chdir(HERE)
     try:
         return {'host': host, 'join': join, 'find': find}[args.command](args)
