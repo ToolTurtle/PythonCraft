@@ -101,10 +101,10 @@ class CraftingScreen(Screen):
 
     def __init__(self, ui, size):
         self.size = size
-        panel, center = ((0.62, 0.56), 0.02) if size == 2 else ((0.62, 0.64), 0.06)
+        panel, center = ((0.62, 0.62), 0.10) if size == 2 else ((0.62, 0.64), 0.06)       # (your own inventory is taller: it holds the armor)
         super().__init__(ui, 'Crafting', panel, center)
         self.cells = [None] * (size * size)
-        top = 0.2 if size == 2 else 0.26
+        top = 0.25 if size == 2 else 0.26
         for i in range(size * size):
             col, row = i % size, i // size
             self.slot(self.cells, i, -0.12 + (col - (size - 1) / 2) * STEP, top - row * STEP)
@@ -112,10 +112,11 @@ class CraftingScreen(Screen):
         out_y = top - (size - 1) / 2 * STEP
         if size == 2:                                     # your own inventory also shows what you are wearing
             for i in range(4):
-                self.slot(ui.inventory.armor, i, -0.255, top + 0.045 - i * STEP)
+                self.slot(ui.inventory.armor, i, -0.255, 0.30 - i * STEP)      # (between the title and the inventory rows)
         self.output = SlotView(self, 'crafting_output', self.result, 0.14, out_y, size=SLOT * 1.15)
         self.views.append(self.output)
-        self.player_inventory(y_main=out_y - 0.15, y_hotbar=out_y - 0.15 - 3 * STEP - 0.015)
+        y_main = 0.045 if size == 2 else out_y - 0.15
+        self.player_inventory(y_main=y_main, y_hotbar=y_main - 3 * STEP - 0.015)
 
     def result(self):
         recipe = crafting.find([c.name if c else None for c in self.cells], self.size, self.size)

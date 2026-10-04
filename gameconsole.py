@@ -183,6 +183,8 @@ class GameConsole:
         self.log.text = '\n'.join(self.lines)
 
     def update(self, dt):
+        from ursina import window
+        self.root.scale = min(1.0, window.aspect_ratio / 1.56)         # (smaller on a narrow window, so nothing is cut off)
         if self._skip_slash and self.is_open:
             self._skip_slash = False
             if self.field.text.startswith('/'):

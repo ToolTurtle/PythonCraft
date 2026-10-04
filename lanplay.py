@@ -89,8 +89,8 @@ class Chat:
         self.game, self.send, self.is_open = game, send, False
         self.lines = []                                   # (time, text)
         self.history, self.history_at = [], 0
-        self.text = Text('', parent=camera.ui, position=(-.85, -.16), origin=(-.5, .5), scale=.9, line_height=1.1)
-        self.field = InputField(parent=camera.ui, x=-.35, y=-.34, scale=(1.0, .045), character_limit=200, active=False, enabled=False)
+        self.text = Text('', parent=camera.ui, position=(-.7, -.28), origin=(-.5, -.5), scale=.9, line_height=1.1)
+        self.field = InputField(parent=camera.ui, x=-.2, y=-.32, scale=(1.0, .045), character_limit=200, active=False, enabled=False)
         self.field.submit_on = ['enter']
         self.field.on_submit = self._submit
         self._shown = None
@@ -145,6 +145,12 @@ class Chat:
         self.close()
 
     def update(self):
+        from ursina import window
+        left = -window.aspect_ratio / 2 + 0.02                        # (the left edge of the window, whatever its shape)
+        self.text.x = left
+        width = min(1.0, window.aspect_ratio - 0.1)
+        self.field.scale_x = width
+        self.field.x = left + width / 2
         if self.is_open and getattr(self, '_opened_with', None):
             key, self._opened_with = self._opened_with, None
             if self.field.text == self._prefix + key:                  # (the key that opened the chat must not be typed)
@@ -156,8 +162,7 @@ class Chat:
         if shown != self._shown:
             self._shown = shown
             self.text.text = shown
-            self.text.origin = (-.5, .5)                              # (a text that changes size must be lined up again)
-            self.text.x = -.85
+            self.text.origin = (-.5, -.5)                             # (a text that changes size must be lined up again)
 
 
 def play(host, port, code, name, screenshot=None, seconds=6, hook=None):
