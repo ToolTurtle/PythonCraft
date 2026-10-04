@@ -1974,6 +1974,9 @@ def runplot(plot, mode='adventure', time=None, border=True, dimension='overworld
         return True
 
     def on_input(key):
+        if game.console is not None and game.console.is_open:          # typing code: u, y, c, k... are letters, not shortcuts
+            game.input(key)
+            return
         if level_key(key) and not game.ui.active and not game.menu.is_open:
             return
         function = plot._hooks['keys'].get(key)

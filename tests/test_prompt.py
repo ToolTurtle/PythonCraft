@@ -95,6 +95,30 @@ class PlainCommands(unittest.TestCase):
         self.assertEqual(opened.call_args.args[1], 'sand')
 
 
+class MultiLine(unittest.TestCase):
+    def setUp(self):
+        _, self.s = make()
+
+    def test_when_enter_runs_and_when_it_adds_a_line(self):
+        more = self.s.needs_more
+        self.assertFalse(more('placeblock 1 1 1 stone'))
+        self.assertFalse(more('x = 3'))
+        self.assertFalse(more(':undo'))
+        self.assertTrue(more('for i in range(3):'))
+        self.assertTrue(more('for i in range(3):\n    placeblock i 1 1 stone'))          # (a block waits for an empty line)
+        self.assertFalse(more('for i in range(3):\n    placeblock i 1 1 stone\n    '))
+        self.assertTrue(more('if x:\n    y\nelse:'))
+        self.assertTrue(more('w.fill(1, 1, 1,'))                                         # (open brackets)
+        self.assertFalse(more('w.fill(1, 1, 1, 2, 2, 2, "stone")'))
+        self.assertFalse(more('placeblock 1 1 +'))                                       # (a mistake runs, so it is explained)
+
+    def test_a_whole_typed_block_runs_line_by_line(self):
+        plot, s = make()
+        text = 'for i in range(3):\n    if i:\n        placeblock i 1 1 stone\n    else:\n        placeblock i 2 1 bricks\n'
+        say(s, *text.split('\n'), '')
+        self.assertEqual((plot.count('stone'), plot.count('bricks')), (2, 1))
+
+
 class Autocomplete(unittest.TestCase):
     def setUp(self):
         _, s = make()

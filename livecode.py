@@ -45,6 +45,7 @@ Type Python at the pc> prompt (w is your plot, pc is pycraft). Commands start wi
   :run FILE.py     run a file of code here (undoable as one step)
   :history         what you have typed so far
   :tp X Y Z        move yourself to a place in the plot
+  unstuck          move to the nearest free spot if you are stuck inside blocks (also: the Unstuck button in the Esc menu)
   :fly / :walk     fly around (spectator) / walk again
   :blocks WORD     find block names that contain WORD
   paint FILE.png   open the picture painter (--like BLOCK or --skin CREATURE to start from a copy)
@@ -72,7 +73,7 @@ class Session:
         self.commands = {'undo': self.cmd_undo, 'redo': self.cmd_redo, 'delay': self.cmd_delay, 'clear': self.cmd_clear,
                          'save': self.cmd_save, 'load': self.cmd_load, 'export': self.cmd_export, 'run': self.cmd_run,
                          'history': self.cmd_history, 'tp': self.cmd_tp, 'fly': self.cmd_fly, 'walk': self.cmd_walk,
-                         'blocks': self.cmd_blocks, 'paint': self.cmd_paint, 'help': self.cmd_help, 'quit': self.cmd_quit, 'exit': self.cmd_quit}
+                         'blocks': self.cmd_blocks, 'paint': self.cmd_paint, 'unstuck': self.cmd_unstuck, 'help': self.cmd_help, 'quit': self.cmd_quit, 'exit': self.cmd_quit}
         for name in dir(plot):                                   # fill(...) works as well as w.fill(...)
             if not name.startswith('_') and name not in self.namespace and callable(getattr(plot, name)):
                 self.namespace[name] = getattr(plot, name)
@@ -84,7 +85,7 @@ class Session:
         plot.add_menu_button('Undo', self.undo)
         plot.add_menu_button('Redo', self.redo)
         plot._console = (self.feed, lambda: self.more_prompt if self.__dict__.get('_buffer') else self.prompt,
-                         self.completer, lambda: self.completer.indent_for(self.__dict__.get('_buffer')))   # press / in the game
+                         self.completer, lambda: self.completer.indent_for(self.__dict__.get('_buffer')), self.needs_more)   # press / in the game
 
     # ---- errors in a friendly, short form ----------------------------------------------------------------------
 
@@ -277,6 +278,13 @@ class Session:
                 del words[at:at + 2]
         print(f'Opening the painter on {self.pycraft.paint(words[0], **options)} (save with Ctrl+S, then use it in your mod).')
 
+    def cmd_unstuck(self, rest):
+        game = self.plot._game
+        if game is None:
+            print('The game is not open.')
+            return
+        self.plot._later(game.unstuck)
+
     def cmd_blocks(self, rest):
         names = [n for n in self.pycraft.BLOCKS if rest.lower() in n]
         print(', '.join(names) if names else f'No block has {rest!r} in its name.')
@@ -372,6 +380,24 @@ class Session:
                 pass
             arguments.append(repr(word))
         return f"w.{name}({', '.join(arguments)})"
+
+    def needs_more(self, text):
+        """Should Enter add another line (True) or run what is typed (False)? A block (a line ending in :) goes on until a blank
+        line; brackets and quotes that are not closed yet go on too; anything else runs."""
+        import codeop
+        lines = text.split('\n')
+        if len(lines) > 1 and not lines[-1].strip():
+            return False
+        stripped = [line.strip() for line in lines if line.strip()]
+        if not stripped or stripped[0].startswith(':'):
+            return False
+        if any(line.endswith(':') and not line.startswith('#') for line in stripped):
+            return True
+        plain = [line[:len(line) - len(line.lstrip())] + (self.translate(line) or line.strip()) for line in lines]
+        try:
+            return codeop.compile_command('\n'.join(plain) + '\n') is None
+        except (SyntaxError, ValueError, OverflowError):
+            return False                                           # (a mistake: run it, so the message appears)
 
     def feed(self, line):
         """One line typed at the prompt: a :command, Python, or part of a block that is not finished yet."""

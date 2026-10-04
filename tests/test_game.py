@@ -30,6 +30,13 @@ def check(game):
     print('MOBS', kinds)
     print('IRON', sum(1 for v in game.world.modified.values() if v == 'iron_block'))
     print('CONSOLE', game.console is not None)
+    game.player.position = (8, 5, 8)                    # inside a block of the floor: stuck
+    game.world.place((8, 5, 8), 'stone') if game.world.get((8, 5, 8)) is None else None
+    game.unstuck()
+    p = game.player
+    cell = (round(p.x), int((p.y + 0.5) // 1), round(p.z))
+    print('UNSTUCK', game.world.solid_top(cell) == 0 and game.world.solid_top((cell[0], cell[1] + 1, cell[2])) == 0
+          and game.world.solid_top((cell[0], cell[1] - 1, cell[2])) > 0)
 
 pc.runplot(w, pc.adventure, _hook=check)
 '''
@@ -49,7 +56,8 @@ class Boot(unittest.TestCase):
         script.write_text(PROGRAM.format(root=str(ROOT), png=png, pattern=pattern))
         out = subprocess.run([sys.executable, str(script)], capture_output=True, text=True, timeout=180, cwd=str(folder))
         self.assertIn("MOBS ['gt_golem']", out.stdout, out.stdout[-800:] + out.stderr[-800:])      # the pattern turned into the golem
-        self.assertIn('IRON 0', out.stdout)                                                          # and used up its blocks
+        self.assertIn('IRON 0', out.stdout)
+        self.assertIn('UNSTUCK True', out.stdout)                                                    # the Unstuck button's move                                                          # and used up its blocks
         self.assertNotIn('Traceback', out.stderr)
 
 

@@ -18,6 +18,7 @@ class PauseMenu:
         self.hide_while_open = []     # HUD pieces to hide while the menu is showing
         self.on_save = None           # set by game.py
         self.on_respawn = None
+        self.on_unstuck = None        # set by game.py
         self.locked_mode = None       # e.g. 'Adventure': the mode button then shows it and cannot be changed
         self.sky = None               # set by game.py
         self.on_quit = None
@@ -32,6 +33,8 @@ class PauseMenu:
         Entity(parent=self.root, model='quad', scale=(.95, .95), x=.075, y=0,
                color=color.rgb32(45, 45, 45), z=.5)                                             # panel
         Text('Paused', parent=self.root, origin=(0, 0), x=.075, y=.41, scale=2)
+
+        self._button('Unstuck', .41, self._unstuck, width=.13, x=.31)           # (the Undo and Redo buttons of pycraft sit to its left)
 
         y = .33
         self.sens_slider = self._slider('Mouse sensitivity', 5, 150, self.player.mouse_sensitivity[0], y,
@@ -134,6 +137,12 @@ class PauseMenu:
             for slider, value in zip(sliders, textures.get_tint(name)):
                 slider.value_setter(value, call_on_value_changed=False)
             self.swatches[name].color = color.rgb32(*textures.get_tint(name))
+
+    def _unstuck(self):
+        """Stuck inside blocks? Move to the nearest free spot (nothing else changes)."""
+        self.close()
+        if self.on_unstuck:
+            self.on_unstuck()
 
     def _respawn(self):
         """Back to the world's spawn point with full health and food (also handy if you get stuck)."""

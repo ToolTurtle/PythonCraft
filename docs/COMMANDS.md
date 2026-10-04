@@ -44,6 +44,9 @@ fill       <x1> <y1> <z1> <x2> <y2> <z2> <block>
 
 - **Tab** finishes the word you are typing: commands (`pl<Tab>`), block names (`placeblock 0 0 0 oak_<Tab>`), creatures (`spawnmob 1 1 1 zom<Tab>`), `pc.` names (`pc.ob<Tab>`), `:commands`. Press Tab again to go through the choices. It also finds names that only *contain* what you typed, and fixes near-misses.
 - **The hint line** (in the game, under the input) shows how the command is written (`placeblock x y z [id] [facing]`) and the names that fit.
+- **Several lines**: in the game the prompt is a small editor. Enter runs what you typed, *unless* you are in the middle of a block
+  (a line ending in `:`, like `for` and `if`, or brackets that are not closed yet): then Enter starts a new, indented line, and Enter on an
+  empty line runs the whole block. **Shift+Enter** always starts a new line. Up/Down on the first/last line bring back earlier code.
 - **Indent**: after a line ending in `:` the next line starts indented by itself; `else:`/`elif:` step back; an empty line ends the block. You can type your own spaces instead.
 - Plain commands work inside blocks, with variables and sums as numbers: `placeblock i+3 1 3 stone`.
 
@@ -69,6 +72,7 @@ fill       <x1> <y1> <z1> <x2> <y2> <z2> <block>
 | `:history` | list what you typed |
 | `:tp X Y Z` | move yourself there |
 | `:fly` / `:walk` | spectator flying / walking again |
+| `unstuck` | move to the nearest free spot if you are inside blocks (also the **Unstuck** button in the Esc menu) |
 | `:blocks WORD` | find block names containing WORD |
 | `:help` / `:quit` | the list / close the game |
 

@@ -104,6 +104,7 @@ class Game:
         self.interaction.fluids = self.fluids
         menu.on_save = self.save
         menu.on_respawn = self.respawn_player
+        menu.on_unstuck = self.unstuck
         menu.sky = self.sky
         menu.on_quit = self.save_and_quit
 
@@ -310,6 +311,49 @@ class Game:
         mouse.locked = False
         cursor.set_hidden(False)
         self.death_screen.show()
+
+    def unstuck(self):
+        """Move the player to the nearest free spot (two free cells above a floor), keeping health, items and the world as they are.
+        If nothing is near, to the top of the ground here; failing that, the spawn point."""
+        import math as _math
+        from chunk import HEIGHT
+        player, world = self.player, self.world
+        cx, cz = round(player.x), round(player.z)
+        fy = _math.floor(player.y + 0.5)
+
+        def free(x, y, z):
+            return world.solid_top((x, y, z)) == 0 and world.get((x, y, z)) not in ('lava',)
+
+        def standable(x, y, z):
+            return 0 <= y < HEIGHT and free(x, y, z) and free(x, y + 1, z) and world.solid_top((x, y - 1, z)) > 0
+
+        best = None
+        for radius in range(0, 9):
+            found = []
+            for dx in range(-radius, radius + 1):
+                for dz in range(-radius, radius + 1):
+                    if max(abs(dx), abs(dz)) != radius:
+                        continue
+                    for y in range(fy - 8, fy + 9):
+                        if standable(cx + dx, y, cz + dz):
+                            found.append((dx * dx + dz * dz + (y - fy) ** 2, (cx + dx, y, cz + dz)))
+            if found:
+                best = min(found)[1]
+                break
+        if best is None:
+            for y in range(HEIGHT - 3, 0, -1):
+                if standable(cx, y, cz):
+                    best = (cx, y, cz)
+                    break
+        if best is None:
+            self.respawn_player()
+            self.message('Nowhere free near you, so back to the start.', 4)
+            return False
+        player.position = (best[0], best[1] - 0.5 + 0.01, best[2])
+        player.velocity_y = 0
+        player._peak_y = player.y                          # (no falling damage for this)
+        self.message('Moved you to a free spot.', 3)
+        return True
 
     def respawn_player(self):
         """Back to the overworld spawn point, wherever you died."""
