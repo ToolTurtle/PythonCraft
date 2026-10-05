@@ -211,9 +211,9 @@ class TeacherPanel:
 
     PER_PAGE = 10
 
-    def __init__(self, game, send, follow):
+    def __init__(self, game, send, follow, plot_size=lambda: (16, 16)):
         from ursina import Button, Entity, InputField, Text, camera, color
-        self.game, self.send, self.follow = game, send, follow
+        self.game, self.send, self.follow, self.plot_size = game, send, follow, plot_size
         self.is_open, self.page, self.players, self.locked, self.chat_on = False, 0, [], False, True
         self._dynamic = []
         self.root = Entity(parent=camera.ui, enabled=False, z=-2)
@@ -234,6 +234,13 @@ class TeacherPanel:
         self.field = InputField(parent=self.root, x=-.3, y=.235, scale=(.9, .04), character_limit=200, active=False)
         button('Announce', .38, .235, .2, self._announce, 60)
         self.status = Text('', parent=self.root, x=-.78, y=.195, scale=.8)
+        button('Plots smaller', .2, .195, .15, lambda: self._plots(-2), 70)
+        button('Plots bigger', .36, .195, .15, lambda: self._plots(2), 70)
+        button('Add a plot', .52, .195, .15, lambda: self.send('/addplot'), 70)
+
+    def _plots(self, step):
+        width, depth = self.plot_size()
+        self.send(f'/plotsize {max(4, width + step)} {max(4, depth + step)}')
 
     def _announce(self):
         text = self.field.text.strip()
@@ -532,6 +539,9 @@ def play(host, port, code, name, screenshot=None, seconds=6, hook=None):
         if animals['snap_timer'] <= 0:
             animals['snap_timer'] = 0.2
             entries, animals['ids'] = [], {}
+            for mob in real_mobs():
+                if mob.y < -20:                                        # (fell out of the world: it is gone)
+                    game.mobs.remove(mob)
             for mob in real_mobs()[:200]:
                 if not hasattr(mob, 'net_id'):
                     mob.net_id, animals['next'] = animals['next'], animals['next'] + 1
@@ -607,9 +617,13 @@ def play(host, port, code, name, screenshot=None, seconds=6, hook=None):
         session.lan_plot = plot_info['id'] if plot_info else None
         return session
 
+    def plot_key(plot_info):
+        return (plot_info['id'], plot_info['x1'], plot_info['z1'], plot_info['x2'], plot_info['z2']) if plot_info else None
+
     def switch_session(plot_info):
         state['session'] = make_session(plot_info)
         state['code_plot'] = plot_info['id'] if plot_info else None
+        state['code_key'] = plot_key(plot_info)
 
     def feed(line):
         """What is typed in the code prompt (a teacher can also say `plot 3` to work in another plot)."""
@@ -648,8 +662,11 @@ def play(host, port, code, name, screenshot=None, seconds=6, hook=None):
         state['layout'] = Layout.from_json({'plots': message.get('plots', []), 'border': message.get('border'), 'spawn': None})
         draw_tags()
         mine = state['layout'].owner_of(client.name)
-        wanted = mine.id if mine else None
-        if wanted != state['code_plot'] and not (state['teacher'] and state['code_plot'] is not None):
+        if state['teacher'] and state['code_plot'] is not None:           # (a teacher working in some plot: follow that plot if it changed)
+            shown = next((q for q in state['layout'].to_json()['plots'] if q['id'] == state['code_plot']), None)
+            if shown is not None and plot_key(shown) != state.get('code_key'):
+                switch_session(shown)
+        elif plot_key(mine.to_json() if mine else None) != state.get('code_key'):
             switch_session(mine.to_json() if mine else None)
 
     if info.get('plots'):
@@ -662,7 +679,11 @@ def play(host, port, code, name, screenshot=None, seconds=6, hook=None):
             client.chat('/mode spectator me')
             chat.add('Following a student: press X to stop.')
 
-    panel = TeacherPanel(game, client.chat, follow)
+    def plot_size():
+        plots = state['layout'].plots
+        return (plots[0].size if plots else (16, 16))
+
+    panel = TeacherPanel(game, client.chat, follow, plot_size)
     game.lan = type('Lan', (), {'state': state, 'panel': panel, 'client': client, 'remotes': remotes,
                                 'switch_session': staticmethod(switch_session), 'set_authority': staticmethod(set_authority)})()
 

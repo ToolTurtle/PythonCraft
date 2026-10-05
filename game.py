@@ -543,6 +543,7 @@ class Game:
         self.status.root.enabled = playing and player.mode == 'survival'
         self.biome_label.enabled = playing
         player.crosshair.enabled = playing
+        player.crosshair.scale = 1                          # (the cross is always the same small size: nothing may stretch it)
         self.status.update(player, dt)
         self.xp_bar.update(player.xp)
         self.xp_bar.root.enabled = playing and player.mode == 'survival'

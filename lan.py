@@ -2,6 +2,7 @@
 
     python3 lan.py host                       start a class server with a new world (prints the room code and the teacher PIN)
     python3 lan.py host --world NAME          ... from one of your saved worlds (a copy: your save is never changed)
+    python3 lan.py host --plot-mode           a flat world where everyone who joins gets a plot (--plot-size 24, --plot-count 12)
     python3 lan.py host --plot my.pcplot      ... from a pycraft plot or a tutorial world
     python3 lan.py host --class math4.pcclass ... from a class setup with a plot for every student (made with classtool.py)
     python3 lan.py host --play Ms-Lee         ... and also play in it on this computer
@@ -62,6 +63,19 @@ def make_world(args):
         args.mode = args.mode or setup.mode
         if target.exists() and not args.fresh:
             return WorldState.load(target), target                # (the class world as it was left)
+        return setup.build_world(), target
+    if getattr(args, 'plot_mode', False):
+        from classworld import ClassSetup
+        width, _, depth = str(args.plot_size).lower().partition('x')
+        try:
+            width, depth = int(width), int(depth or width)
+        except ValueError:
+            raise SystemExit('--plot-size is a number like 16, or width x depth like 20x14.')
+        target = world_path('plot world')
+        if target.exists() and not args.fresh:
+            return WorldState.load(target), target                # (the plot world as it was left)
+        setup = ClassSetup.for_roster('Plot world', [], width, depth, 5, args.columns, extra=args.plot_count, mode=args.mode or 'creative', auto_claim=True)
+        args.mode = args.mode or 'creative'
         return setup.build_world(), target
     if args.plot:
         import pycraft
@@ -197,6 +211,10 @@ def main(argv=None):
     sub = parser.add_subparsers(dest='command', required=True)
     h = sub.add_parser('host', help='start a class server')
     h.add_argument('--world', help='start from a saved world (it is copied: your save is never changed)')
+    h.add_argument('--plot-mode', action='store_true', help='a flat world where everyone who joins gets a plot of their own (the teacher can change sizes)')
+    h.add_argument('--plot-size', default='16', metavar='W[xD]', help='for --plot-mode: how big each plot is (default 16)')
+    h.add_argument('--plot-count', type=int, default=8, metavar='N', help='for --plot-mode: how many plots to start with (more appear as players join; default 8)')
+    h.add_argument('--columns', type=int, help='for --plot-mode: how many plots side by side')
     h.add_argument('--plot', help='start from a .pcplot (a pycraft plot or tutorial world)')
     h.add_argument('--class', dest='class_file', metavar='FILE', help='start from a class setup (.pcclass) made with classtool.py: plots for every student')
     h.add_argument('--badwords', metavar='FILE', help='words the chat filter stars out (default: badwords.txt)')

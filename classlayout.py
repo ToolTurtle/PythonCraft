@@ -9,7 +9,10 @@ import json
 import re
 
 GROUND = 3                    # the top layer of a flat class world (a plot's y = 0 is the block above it)
+GROUND_BLOCK = 'grass'        # what that top layer is made of in a flat world
 HEIGHT = 128
+MIN_PLOT, MAX_PLOT = 4, 128   # how small and how big a plot can be
+MIN_GAP = 3                   # the least space between two plots (room for the line round each and a path)
 
 
 class Plot:
@@ -34,11 +37,13 @@ class Plot:
 
 
 class Layout:
-    def __init__(self, plots=None, border=None, spawn=None, self_claim=True):
+    def __init__(self, plots=None, border=None, spawn=None, self_claim=True, grid=None, auto_claim=False):
         self.plots = list(plots or [])
         self.border = border                           # (x1, z1, x2, z2) or None: nobody (but teachers) goes or builds outside it
         self.spawn = spawn                             # (x, y, z) where players start
         self.self_claim = bool(self_claim)             # may students /claim a free plot themselves?
+        self.grid_info = grid                          # {'columns', 'width', 'depth', 'gap', 'margin'} for a grid layout (None: plots placed by hand)
+        self.auto_claim = bool(auto_claim)             # does everyone who joins get a plot at once (and the grid grows if there are not enough)?
 
     # ---- who owns what -----------------------------------------------------------------------------------------------
 
@@ -92,10 +97,72 @@ class Layout:
                 owner = names[number - 1] if number - 1 < len(names) and names[number - 1] else None
                 plots.append(Plot(number, x1, z1, x1 + width - 1, z1 + depth - 1, owner))
                 number += 1
-        total_x, total_z = columns * (width + gap) - gap, rows * (depth + gap) - gap
-        border = (-margin, -margin - 4, total_x + margin - 1, total_z + margin - 1)
-        spawn = (total_x / 2, GROUND + 1.01, -margin / 2 - 2)
-        return cls(plots, border, spawn)
+        layout = cls(plots, grid={'columns': columns, 'width': width, 'depth': depth, 'gap': gap, 'margin': margin})
+        layout.refit()
+        return layout
+
+    # ---- changing a layout (plots bigger or smaller, one more plot) -------------------------------------------------------------------
+
+    def refit(self):
+        """Work out the border and the start again, after the plots changed."""
+        margin = (self.grid_info or {}).get('margin', 14)
+        if not self.plots:
+            return
+        x1, x2 = min(p.x1 for p in self.plots), max(p.x2 for p in self.plots)
+        z1, z2 = min(p.z1 for p in self.plots), max(p.z2 for p in self.plots)
+        self.border = (x1 - margin, z1 - margin - 4, x2 + margin, z2 + margin)
+        self.spawn = ((x1 + x2) / 2, GROUND + 1.01, z1 - margin / 2 - 2)
+
+    def _slot(self, index, width=None, depth=None):
+        """Where plot number `index` (counting from 0) goes in the grid: (x1, z1)."""
+        info = self.grid_info
+        width, depth = width or info['width'], depth or info['depth']
+        return (index % info['columns']) * (width + info['gap']), (index // info['columns']) * (depth + info['gap'])
+
+    def relayout(self, width, depth=None):
+        """Make every plot width x depth and put them in the grid again (keeping who owns which). Only for grid layouts."""
+        if self.grid_info is None:
+            raise ValueError('These plots were not made as a grid, so they cannot all be resized at once. (/resize N W D does one plot.)')
+        depth = depth or width
+        self._check_size(width, depth)
+        self.grid_info = dict(self.grid_info, width=width, depth=depth)
+        for index, plot in enumerate(sorted(self.plots, key=lambda p: p.id)):
+            x1, z1 = self._slot(index)
+            plot.x1, plot.z1, plot.x2, plot.z2 = x1, z1, x1 + width - 1, z1 + depth - 1
+        self.refit()
+
+    def add_plot(self, owner=None):
+        """One more plot in the grid (the next free place). Returns it."""
+        if self.grid_info is None:
+            raise ValueError('These plots were not made as a grid, so a plot cannot be added.')
+        if len(self.plots) >= 400:
+            raise ValueError('That is as many plots as there can be (400).')
+        index = len(self.plots)
+        x1, z1 = self._slot(index)
+        ident = max([p.id for p in self.plots] + [0]) + 1
+        plot = Plot(ident, x1, z1, x1 + self.grid_info['width'] - 1, z1 + self.grid_info['depth'] - 1, owner)
+        self.plots.append(plot)
+        self.refit()
+        return plot
+
+    def resize_plot(self, plot, width, depth=None):
+        """Make one plot bigger or smaller, keeping its corner (x1, z1) where it is. It must keep room round it: MIN_GAP blocks from every other plot."""
+        depth = depth or width
+        self._check_size(width, depth)
+        x2, z2 = plot.x1 + width - 1, plot.z1 + depth - 1
+        for other in self.plots:
+            if other is plot:
+                continue
+            if not (x2 + MIN_GAP < other.x1 or plot.x1 - MIN_GAP > other.x2 or z2 + MIN_GAP < other.z1 or plot.z1 - MIN_GAP > other.z2):
+                raise ValueError(f'Plot {plot.id} would be too close to plot {other.id}: there must be at least {MIN_GAP} blocks between plots.')
+        plot.x2, plot.z2 = x2, z2
+        self.refit()
+
+    @staticmethod
+    def _check_size(width, depth):
+        for value in (width, depth):
+            if isinstance(value, bool) or not isinstance(value, int) or not MIN_PLOT <= value <= MAX_PLOT:
+                raise ValueError(f'A plot is {MIN_PLOT} to {MAX_PLOT} blocks wide and deep.')
 
     def marker_blocks(self):
         """{(x, y, z): block name}: a ring of stone bricks around every plot, gravel on the paths between them. (The ground itself
@@ -123,7 +190,8 @@ class Layout:
 
     def to_json(self):
         return {'plots': [p.to_json() for p in self.plots], 'border': list(self.border) if self.border else None,
-                'spawn': list(self.spawn) if self.spawn else None, 'self_claim': self.self_claim}
+                'spawn': list(self.spawn) if self.spawn else None, 'self_claim': self.self_claim, 'grid': self.grid_info,
+                'auto_claim': self.auto_claim}
 
     @classmethod
     def from_json(cls, data):
@@ -134,7 +202,13 @@ class Layout:
             plots.append(Plot(entry['id'], entry['x1'], entry['z1'], entry['x2'], entry['z2'], entry.get('owner'), entry.get('label', '')))
         border = tuple(data['border']) if data.get('border') else None
         spawn = tuple(data['spawn']) if data.get('spawn') else None
-        return cls(plots, border, spawn, data.get('self_claim', True))
+        grid = data.get('grid')
+        if isinstance(grid, dict):
+            grid = {k: int(grid[k]) for k in ('columns', 'width', 'depth', 'gap', 'margin') if k in grid}
+            grid = grid if len(grid) == 5 else None
+        else:
+            grid = None
+        return cls(plots, border, spawn, data.get('self_claim', True), grid, data.get('auto_claim', False))
 
     def describe(self):
         lines = []

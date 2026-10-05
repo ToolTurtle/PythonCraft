@@ -156,7 +156,7 @@ In the full game, put the mod file (`.pcmod` or `.py`) in `mods/` and it loads a
 `python3 lan.py join` (students) and `python3 classtool.py` / `python3 lan.py host --class FILE` (teachers): see [README_lan.md](README_lan.md).
 In the game: **T** chat, **C** the code prompt (everything on this page works there, building inside your own plot: `fill 0 0 0 5 0 5 stone`),
 **P** the teacher panel. Chat commands (type `/` first): `/claim` `/home` `/plots` `/list` `/help` for everyone, and for teachers
-`/mode` `/freeze` `/lock` `/code` `/mute` `/chat` `/history` `/undo` `/assign` `/unassign` `/goto` `/tp` `/bring` `/say` `/time` (`/help` lists them).
+`/mode` `/freeze` `/lock` `/code` `/mute` `/chat` `/history` `/undo` `/assign` `/unassign` `/plotsize` `/resize` `/addplot` `/goto` `/tp` `/bring` `/say` `/time` (`/help` lists them).
 Teachers can type `plot 3` at the code prompt to build in another student's plot.
 
 ## Asking an assistant for a build

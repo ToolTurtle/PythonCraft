@@ -18,26 +18,29 @@ PLOT_HEIGHT = 48                       # how tall a plot's code area is (and how
 
 
 class ClassSetup:
-    def __init__(self, name='My class', roster=(), layout=None, mode='adventure', self_claim=True, template=None):
+    def __init__(self, name='My class', roster=(), layout=None, mode='adventure', self_claim=True, template=None, auto_claim=False):
         self.name = str(name)[:60] or 'My class'
         self.roster = list(roster)
         self.layout = layout or Layout.grid(1, 1)
         self.mode = mode
         self.self_claim = bool(self_claim)
+        self.auto_claim = bool(auto_claim)             # everyone who joins gets a plot at once (and the grid grows if needed): plot mode
         self.template = template                       # {'blocks': {(x, y, z): name}, 'facing': {(x, y, z): facing}} in plot coordinates, or None
 
     # ---- making one ----------------------------------------------------------------------------------------------------------
 
     @classmethod
-    def for_roster(cls, name, names, width=16, depth=16, gap=5, columns=None, extra=2, mode='adventure'):
+    def for_roster(cls, name, names, width=16, depth=16, gap=5, columns=None, extra=2, mode='adventure', auto_claim=False):
         """A grid with a plot for everyone on the roster (and `extra` spare ones), the names filled in."""
         names = clean_roster('\n'.join(names)) if not isinstance(names, str) else clean_roster(names)
         total = max(1, len(names) + extra)
         columns = columns or max(1, min(8, round(total ** 0.5 + 0.49)))
         rows = -(-total // columns)
         layout = Layout.grid(columns, rows, width, depth, gap, names=names)
+        layout.plots = layout.plots[:total]                              # (exactly as many plots as asked for: the grid may have empty places at the end)
+        layout.refit()
         layout.self_claim = True
-        return cls(name, names, layout, mode)
+        return cls(name, names, layout, mode, auto_claim=auto_claim)
 
     def set_owner(self, plot_id, name):
         plot = self.layout.plot_by_id(plot_id)
@@ -61,7 +64,7 @@ class ClassSetup:
             template = {'blocks': pcplot.pack_blocks(self.template['blocks']),
                         'facing': [[x, y, z, f] for (x, y, z), f in self.template.get('facing', {}).items()]}
         return {'format': FORMAT, 'version': VERSION, 'name': self.name, 'roster': self.roster, 'layout': self.layout.to_json(),
-                'mode': self.mode, 'self_claim': self.self_claim, 'template': template}
+                'mode': self.mode, 'self_claim': self.self_claim, 'auto_claim': self.auto_claim, 'template': template}
 
     @classmethod
     def from_json(cls, data):
@@ -76,7 +79,7 @@ class ClassSetup:
                         'facing': {(x, y, z): f for x, y, z, f in data['template'].get('facing', [])}}
         mode = data.get('mode', 'adventure')
         return cls(data.get('name', 'My class'), clean_roster('\n'.join(map(str, data.get('roster', [])))), layout,
-                   mode if mode in ('adventure', 'survival', 'creative', 'spectator') else 'adventure', data.get('self_claim', True), template)
+                   mode if mode in ('adventure', 'survival', 'creative', 'spectator') else 'adventure', data.get('self_claim', True), template, data.get('auto_claim', False))
 
     def save(self, path):
         path = Path(path)
@@ -98,6 +101,7 @@ class ClassSetup:
     def build_world(self):
         """The class world to start from: a flat world with the plot markers, and the starter build in every plot."""
         self.layout.self_claim = self.self_claim
+        self.layout.auto_claim = self.auto_claim
         changes = {pos: (name, None) for pos, name in self.layout.marker_blocks().items()}
         world = WorldState(0, self.name, list(self.layout.spawn), changes, self.layout)
         if self.template:

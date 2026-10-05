@@ -39,6 +39,31 @@ your saved worlds: your save is never changed), `--plot city.pcplot`. `--play NA
 New students start in **adventure** mode (they can walk and open doors but not build by hand): change it in the class tool or with `--mode`.
 The class world is kept in `lanworlds/` and carries on next time (`--fresh` starts again from the setup).
 
+## Plot mode: the quick way to give everyone a plot
+
+```bash
+python3 lan.py host --plot-mode                      # a flat world; everyone who joins gets a plot of their own
+python3 lan.py host --plot-mode --plot-size 24 --plot-count 12
+python3 lan.py host --plot-mode --plot-size 30x20 --mode survival
+```
+
+The world is flat grass with a stone-brick line round every plot and gravel paths between them. Whoever joins gets the next free plot at once, and
+**the grid grows by itself** when the plots run out, so there is always one for everybody. (A teacher does not use up a plot: when someone
+becomes a teacher their empty plot goes back to the students.) New players start in creative mode here, so they can build freely inside their plot
+(`--mode survival` or `adventure` change that). In the class tool the same is the tick box *Plot mode: everyone who joins gets a plot*.
+
+**The teacher can change the sizes while the class is running**, from the dashboard (*Plot size*), from the teacher panel (**P**: *Plots smaller*,
+*Plots bigger*, *Add a plot*) or by typing:
+
+| Command | Does |
+|---|---|
+| `/plotsize 24` or `/plotsize 24 16` | every plot becomes that size (width x depth) and they are laid out again, keeping who owns which. Only works while nothing is built in the plots: if something is, it says how many blocks and asks you to add `clear` (`/plotsize 24 clear`) to remove them and go ahead |
+| `/resize 3 30 20` | just plot 3, keeping its corner. It must keep 3 blocks of path from the next plot. If it shrinks past things that were built, they stay where they are (add `clear` to remove them) |
+| `/addplot` | one more plot at the end of the grid |
+
+A plot is from 4 to 128 blocks wide and deep. The stone-brick lines and paths are redrawn for everybody at once, and students are taken to their plot
+again if the plots moved.
+
 ## Students: join
 
 ```bash
@@ -76,6 +101,7 @@ go to, bring, **follow** (watch a student from behind), code on/off and kick, pl
 | `/history [name]` | who changed how much; a student's latest changes |
 | `/undo name 5m` | **put back what that student changed** (`30s`, `2h`, a number of changes like `20`, or `all`): anything built over by someone else since is left alone |
 | `/assign name N`, `/unassign name\|N` | give a plot to a name (who need not be here yet) or take it back |
+| `/plotsize W [D]`, `/resize N W [D]`, `/addplot` | change plot sizes, or add a plot (see *Plot mode*) |
 | `/goto N`, `/tp name`, `/bring name\|all` | go to a plot or a student; bring students to you |
 | `/say text`, `/time day\|night\|noon\|sunrise\|sunset` | announce to everyone; set the time |
 | `/teacher off` | stop being a teacher |

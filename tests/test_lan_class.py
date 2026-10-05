@@ -379,3 +379,40 @@ class Animals(Base):
         time.sleep(0.2)
         bo.send_mobhit(1, 5)
         self.assertIsNone(wait_for(ann, 'mobhit', timeout=0.4))
+
+
+class NotTheirFault(Base):
+    """Things that happen to a player (falling out of the world, a mod only one side has) must never get them removed."""
+
+    def test_animals_that_fell_out_of_the_world_or_are_unknown_are_left_out(self):
+        ann, bo = self.join('Ann'), self.join('Bo')
+        good = [1, 'pig', 5.0, 4.0, 3.0, 0.0, 0, 10]
+        for _ in range(30):
+            ann.send_mobs([good, [2, 'sheep', 0.0, -200.0, 0.0, 0.0, 1, 8], [3, 'a_mod_creature', 0.0, 4.0, 0.0, 0.0, 0, 5], [4, 'cow', 1.0, 4.0]])
+        time.sleep(0.5)
+        self.assertIn(ann.id, self.server.players)
+        self.assertEqual([e[1] for e in wait_for(bo, 'mobs')['c']], ['pig'])
+        self.assertEqual(self.server.players[ann.id].bad, 0)
+
+    def test_a_player_falling_into_the_void_stays_in_the_game(self):
+        ann, bo = self.join('Ann'), self.join('Bo')
+        for _ in range(25):
+            ann.send_pos(0.0, -500.0, 0.0, 0, 0)
+            time.sleep(0.03)
+        self.assertIn(ann.id, self.server.players)
+        self.assertEqual(self.server.players[ann.id].pos[1], -64.0)
+
+    def test_the_world_sometimes_changes_at_its_very_edge(self):
+        ann, bo = self.join('Ann'), self.join('Bo')
+        for _ in range(25):
+            ann.send_sim([(1, 70, 1, 'water', None, None, None), (1, 500, 1, 'water', None, None, None), (1, 70, 2, 'not_a_block', None, None, None)])
+        time.sleep(0.5)
+        self.assertIn(ann.id, self.server.players)
+        self.assertEqual(self.server.world.changes[(1, 70, 1)], ('water', None))
+        self.assertNotIn((1, 500, 1), self.server.world.changes)
+
+    def test_but_a_message_that_makes_no_sense_still_counts(self):
+        ann = self.join('Ann')
+        for _ in range(12):
+            ann.send({'t': 'mobs', 'c': 'not a list'})
+        self.assertIsNotNone(wait_for(ann, 'closed', timeout=3))

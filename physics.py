@@ -110,6 +110,16 @@ class Body(Entity):
         spot = (round(self.x), math.floor(self.y + self.height / 2 + .5), round(self.z))
         return self.world.get(spot) == 'water'
 
+    def get_out_of_blocks(self, limit=16):
+        """If this body starts inside solid blocks, move it up to the first free place (up to `limit` blocks)."""
+        if not self._hits_block(self.x, self.y, self.z):
+            return True
+        for step in range(1, limit * 2 + 1):
+            if not self._hits_block(self.x, self.y + step * 0.5, self.z):
+                self.y += step * 0.5
+                return True
+        return False
+
     def fall(self, dt):
         """Let gravity pull us down for one frame; updates `grounded`."""
         if self.in_water():

@@ -18,7 +18,7 @@ import time
 from pathlib import Path
 
 import netproto as proto
-from classlayout import GROUND, Layout
+from classlayout import GROUND, GROUND_BLOCK, Layout
 from netproto import Bucket, ProtocolError
 
 TOGGLES = {'oak_door_b', 'oak_door_t', 'lever', 'lever_on', 'stone_button', 'bed', 'oak_trapdoor'}
@@ -33,7 +33,14 @@ HELP_TEACHER = ('/mode MODE [who|all]  adventure, survival, creative or spectato
                 '/mute who|all  /unmute who|all   /chat on|off  all students   /kick who [why]   /tp who  /bring who|all  /goto N\n'
                 '/history [who]  who changed what   /undo who 5m|30s|20|all  put back what they changed   /code who  what they typed\n'
                 '/assign who N  /unassign who|N  /claim   /plots   /say text  announce   /time day|night|noon|sunrise|sunset\n'
+                '/plotsize W [D] [clear]  all plots that size   /resize N W [D] [clear]  one plot   /addplot  one more plot\n'
                 '/list   /teacher off')
+
+
+def plot_area(bounds):
+    """A stand-in plot for a rectangle (x1, z1, x2, z2): something that can say whether a spot is inside it."""
+    from classlayout import Plot
+    return Plot(0, *bounds)
 
 
 class NeedMods(Exception):
@@ -445,6 +452,8 @@ class LanServer:
         self._elect_authority()
         self.broadcast({'t': 'join', 'p': conn.info()}, skip=conn)
         self.broadcast({'t': 'say', 'm': f'{conn.name} joined.'}, skip=conn)
+        if layout and layout.plots and layout.auto_claim and layout.owner_of(conn.name) is None:
+            self._give_plot(conn)                                          # (plot mode: everyone who joins gets a plot of their own)
         mine = layout.owner_of(conn.name) if layout else None
         self.tell(conn, 'Welcome! /help shows the commands. A teacher types /teacher PIN.'
                   + (f' Your plot is number {mine.id}: /home takes you there.' if mine else
@@ -511,7 +520,8 @@ class LanServer:
     def _position(self, conn, message):
         if not conn.pos_bucket.take():
             return
-        x, y, z = (proto.number(message.get('x')), proto.number(message.get('y'), -64, 1000), proto.number(message.get('z')))
+        x, y, z = (proto.number(message.get('x')), proto.number(message.get('y'), -10 ** 7, 10 ** 7), proto.number(message.get('z')))
+        y = max(-64.0, min(1000.0, y))                               # (a player who falls out of the world is shown at the bottom, not refused)
         yaw, pitch = proto.number(message.get('yaw', 0), -100000, 100000), proto.number(message.get('pitch', 0), -100000, 100000)
         moving = bool(message.get('v', False))
         if conn.frozen:
@@ -604,7 +614,10 @@ class LanServer:
             raise ProtocolError('too many changes at once')
         accepted = []
         for entry in entries:
-            pos, name, facing, _previous = proto.block_change(entry, self.known_blocks)
+            try:
+                pos, name, facing, _previous = proto.block_change(entry, self.known_blocks)
+            except ProtocolError:
+                continue                                              # (the world sometimes changes at its very edge: not the sender's fault)
             self.world.changes[pos] = (name, facing)
             accepted.append(list(entry[:5]))
         if accepted:
@@ -619,13 +632,17 @@ class LanServer:
         if not isinstance(entries, list) or len(entries) > 200:
             raise ProtocolError('too many creatures')
         clean = []
-        for entry in entries:
-            if not isinstance(entry, (list, tuple)) or len(entry) != 8 or not isinstance(entry[1], str) or entry[1] not in self.known_mobs:
-                raise ProtocolError('bad creature')
-            clean.append([proto.number(entry[0], 0, 10 ** 9, integer=True), entry[1], proto.number(entry[2]), proto.number(entry[3], -64, 1000),
-                          proto.number(entry[4]), proto.number(entry[5], -100000, 100000), 1 if entry[6] else 0,
-                          proto.number(entry[7], 0, 5000)])
-        self.broadcast({'t': 'mobs', 'c': clean}, skip=conn)
+        for entry in entries:                                        # (a creature that fell out of the world, or one this server does not know,
+            try:                                                     # is left out: that is not the sender's fault and must never get them removed)
+                if not isinstance(entry, (list, tuple)) or len(entry) != 8 or not isinstance(entry[1], str) or entry[1] not in self.known_mobs:
+                    continue
+                clean.append([proto.number(entry[0], 0, 10 ** 9, integer=True), entry[1], proto.number(entry[2]), proto.number(entry[3], -64, 1000),
+                              proto.number(entry[4]), proto.number(entry[5], -100000, 100000), 1 if entry[6] else 0,
+                              proto.number(entry[7], 0, 5000)])
+            except ProtocolError:
+                continue
+        if clean or not entries:
+            self.broadcast({'t': 'mobs', 'c': clean}, skip=conn)
 
     def _mobhit(self, conn, message):
         """A player hit a creature that the authority runs: pass it to the authority (who works out what happens)."""
@@ -739,6 +756,12 @@ class LanServer:
             return ['That is not the PIN.']
         conn.teacher, conn.pin_failures = True, 0
         conn.mode = 'creative'
+        layout = self.world.layout
+        mine = layout.owner_of(conn.name) if layout else None
+        if mine is not None and layout.auto_claim and not self._built_in([mine]):
+            mine.owner = None                                              # (a teacher builds anywhere: their empty plot goes back for a student)
+            self.world.dirty = True
+            self.send_plots()
         self.send(conn, {'t': 'role', 'teacher': True})
         self.send_mode(conn)
         self.broadcast({'t': 'say', 'm': f'{conn.name} is a teacher now.'})
@@ -956,6 +979,115 @@ class LanServer:
         return [f'{target.name} typed:'] + [f'  {text}' for _stamp, text in list(target.code_log)[-8:]]
 
     # ---- plots -----------------------------------------------------------------------------------------------------------------------------
+
+    def _give_plot(self, conn):
+        """The next free plot, or (in a grid) a new one, becomes this player's."""
+        layout = self.world.layout
+        free = layout.free_plots()
+        if free:
+            plot = free[0]
+        elif layout.grid_info is not None:
+            old = layout.marker_blocks()
+            plot = layout.add_plot()
+            self._repaint(old)
+        else:
+            return None
+        plot.owner = conn.name
+        self.world.dirty = True
+        self.send_plots()
+        return plot
+
+    def _repaint(self, old_markers):
+        """The plots moved or changed size: draw the lines and paths again, for everyone (what is not a line or a path is plain ground)."""
+        layout = self.world.layout
+        new = layout.marker_blocks()
+        changes = []
+        for (x, y, z) in set(old_markers) | set(new):
+            wanted = new.get((x, y, z))
+            current = self.world.changes.get((x, y, z))
+            if (current[0] if current else GROUND_BLOCK) == (wanted or GROUND_BLOCK):
+                continue
+            if wanted is None:
+                self.world.changes.pop((x, y, z), None)
+            else:
+                self.world.changes[(x, y, z)] = (wanted, None)
+            changes.append([x, y, z, wanted or GROUND_BLOCK, None])
+        self._broadcast_changes(changes)
+        self.world.dirty = True
+
+    def _broadcast_changes(self, changes):
+        for start in range(0, len(changes), proto.MAX_BLOCKS_PER_MESSAGE):
+            self.broadcast({'t': 'blocks', 'by': 0, 'c': changes[start:start + proto.MAX_BLOCKS_PER_MESSAGE]})
+
+    def _built_in(self, plot_list):
+        """The positions of everything that is built in these plots (above the ground)."""
+        return [pos for pos, (name, _f) in self.world.changes.items() if name and pos[1] > GROUND and any(p.contains(pos[0], pos[2]) for p in plot_list)]
+
+    def _remove_builds(self, positions):
+        changes = []
+        for pos in positions:
+            del self.world.changes[pos]
+            changes.append([pos[0], pos[1], pos[2], None, None])
+        self._broadcast_changes(changes)
+        self.world.dirty = True
+
+    def _sizes(self, words, usage):
+        numbers = [w for w in words if w.isdigit()]
+        flags = [w.lower() for w in words if not w.isdigit()]
+        if not numbers or len(numbers) > 2 or any(f != 'clear' for f in flags):
+            raise ValueError(usage)
+        width = int(numbers[0])
+        return width, int(numbers[1]) if len(numbers) > 1 else width, 'clear' in flags
+
+    def _cmd_plotsize(self, actor, rest):
+        layout = self._layout()
+        width, depth, clear = self._sizes(rest.split(), '/plotsize W [D] [clear]   makes every plot W wide and D deep (D is W if left out)')
+        built = self._built_in(layout.plots)
+        if built and not clear:
+            raise ValueError(f'{len(built)} blocks are built in the plots, and the plots would move. Say  /plotsize {width} {depth} clear  to remove what is built '
+                             f'and go ahead, or  /resize N {width} {depth}  to change one plot where it is.')
+        old = layout.marker_blocks()
+        layout.relayout(width, depth)
+        if built:
+            self._remove_builds(built)
+        self._repaint(old)
+        self.send_plots()
+        for conn in list(self.players.values()):
+            plot = layout.owner_of(conn.name)
+            if plot is not None and not conn.teacher:
+                self._send_home(conn, plot)
+        return [f'Every plot is {width} x {depth} now.' + (f' ({len(built)} blocks were removed.)' if built else '')]
+
+    def _cmd_resize(self, actor, rest):
+        layout = self._layout()
+        words = rest.split()
+        if not words or not words[0].isdigit():
+            raise ValueError('/resize N W [D] [clear]   makes plot N W wide and D deep, keeping its corner (the far side moves)')
+        plot = layout.plot_by_id(int(words[0]))
+        if plot is None:
+            raise ValueError(f'There is no plot {words[0]}.')
+        width, depth, clear = self._sizes(words[1:], '/resize N W [D] [clear]')
+        old = layout.marker_blocks()
+        was = (plot.x1, plot.z1, plot.x2, plot.z2)
+        layout.resize_plot(plot, width, depth)
+        left_out = [pos for pos in self._built_in([plot_area(was)]) if not plot.contains(pos[0], pos[2])]      # (built in the old plot, outside the new one)
+        if left_out and clear:
+            self._remove_builds(left_out)
+        self._repaint(old)
+        self.send_plots()
+        note = ''
+        if left_out:
+            note = f' {len(left_out)} blocks were removed.' if clear else f' {len(left_out)} blocks are outside it now and stay as they are (/resize {plot.id} {width} {depth} clear removes them).'
+        return [f'Plot {plot.id} is {width} x {depth} now.' + note]
+
+    def _cmd_addplot(self, actor, rest):
+        layout = self._layout()
+        old = layout.marker_blocks()
+        plot = layout.add_plot()
+        self._repaint(old)
+        self.world.dirty = True
+        self.send_plots()
+        return [f'Plot {plot.id} added. ({len(layout.plots)} plots now.)']
 
     def _layout(self):
         layout = self.world.layout

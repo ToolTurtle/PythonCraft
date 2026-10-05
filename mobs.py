@@ -611,6 +611,7 @@ class Mobs:
 
     def add(self, kind_name, position, rotation_y=None, health=None, size=1):
         mob = Mob(self, TYPES[kind_name], position, size)
+        mob.get_out_of_blocks()                                       # (never start inside the ground: it would fall right through)
         if rotation_y is not None:
             mob.rotation_y = mob.heading = rotation_y
         if health is not None:
@@ -774,9 +775,16 @@ class Mobs:
         if biome == 'Jungle':
             kinds.append(TYPES['ocelot']); weights.append(5)
         kind = random.choices(kinds, weights=weights)[0]
+        placed = 0
         for _ in range(random.randint(2, 4) if kind.base == 'wolf' else random.randint(1, 3)):          # animals come in small groups
-            self.add(kind.name, (x + random.uniform(-2, 2), ground + 0.6, z + random.uniform(-2, 2)))
-        return True
+            ax, az = x + random.uniform(-2, 2), z + random.uniform(-2, 2)
+            cx, cz = round(ax), round(az)
+            surface = self.world.height_at(cx, cz)                  # (each animal stands on the ground where IT is: on a hillside the
+            if self.world.get((cx, surface, cz)) != 'grass' or self.world.is_solid((cx, surface + 1, cz)):     # next column is higher or lower)
+                continue
+            self.add(kind.name, (ax, surface + 0.6, az))
+            placed += 1
+        return placed > 0
 
     def _try_spawn_squid(self):
         p = self.player

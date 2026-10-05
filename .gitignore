@@ -23,3 +23,4 @@ minecraft-assets-*/
 # class worlds kept by the LAN server
 lanworlds/
 classes/
+.DS_Store

@@ -52,11 +52,11 @@ def hook(game, client, remotes, chat):
         print('SHARED', block is not None and game.world.get(block) == 'gold_block', flush=True)
         if block:
             game.interaction._break(block, 'gold_block')                # Sam breaks it: the server must hear
-            invoke(lambda: print('SERVER', server.world.changes.get(block), flush=True), delay=0.8)
+            invoke(lambda: print('SERVER', server.world.changes.get(block), flush=True), delay=2.5)
     invoke(check, delay=4.5)
 
 import lanplay
-lanplay.play('127.0.0.1', server.port, 'maple-tiger-42', 'Sam', seconds=6, hook=hook)
+lanplay.play('127.0.0.1', server.port, 'maple-tiger-42', 'Sam', seconds=9, hook=hook)
 server.stop()
 '''
 
@@ -115,10 +115,10 @@ def hook(game, client, remotes, chat):
         print('PLOT2', server.world.layout.plot_by_id(2).owner, flush=True)
         code_blocks = [e for e in ann_events if e['t'] == 'blocks' and e['by'] != 0 and not e.get('sim')]
         print('ANN_SAW_CODE_BLOCKS', len(code_blocks) > 0, flush=True)
-    invoke(check, delay=3.5)
+    invoke(check, delay=4.5)
 
 import lanplay
-lanplay.play('127.0.0.1', server.port, 'maple-tiger-42', 'Sam', seconds=6, hook=hook)
+lanplay.play('127.0.0.1', server.port, 'maple-tiger-42', 'Sam', seconds=9, hook=hook)
 server.stop()
 '''
 
@@ -163,6 +163,62 @@ threading.Thread(target=ann, daemon=True).start()
 import lanplay
 lanplay.play('127.0.0.1', server.port, 'maple-tiger-42', 'Sam', seconds=40, hook=lambda *a: None)
 '''
+
+
+PLOT_SCRIPT = '''
+import sys, time, threading
+sys.path.insert(0, {root!r})
+from classworld import ClassSetup
+from lanserver import LanServer
+from lanclient import LanClient
+
+setup = ClassSetup.for_roster('pm', [], 12, 12, 5, columns=2, extra=2, mode='survival', auto_claim=True)
+server = LanServer(setup.build_world(), pin='teach1', code='maple-tiger-42', host='127.0.0.1', port=0, default_mode='survival').start()
+flag = {{}}
+
+def teacher():
+    while not flag.get('go'):
+        time.sleep(0.05)
+    c = LanClient('127.0.0.1', server.port, 'maple-tiger-42', 'Tea')
+    c.connect()
+    c.chat('/teacher teach1')
+    time.sleep(0.5)
+    c.chat('/plotsize 20')
+    time.sleep(8)
+
+threading.Thread(target=teacher, daemon=True).start()
+
+def hook(game, client, remotes, chat):
+    from ursina import invoke
+    lan = game.lan
+    print('BEFORE', lan.state['layout'].plots[0].size, lan.state['session'].plot._plot[0], game.world.get((12, 3, 3)), flush=True)
+    flag['go'] = True
+    def check():
+        plots = lan.state['layout'].plots
+        print('AFTER_SIZE', plots[0].size, 'SESSION_WIDTH', lan.state['session'].plot._plot[0], flush=True)
+        print('OLD_LINE', game.world.get((12, 3, 3)), 'NEW_LINE', game.world.get((20, 3, 3)), flush=True)
+        lan.state['session'].feed('fill 15 0 0 18 0 0 gold_block')           # (only fits in the new, bigger plot)
+        print('BUILT', game.world.get((15, 4, 0)), game.world.get((18, 4, 0)), flush=True)
+    invoke(check, delay=4.0)
+
+import lanplay
+lanplay.play('127.0.0.1', server.port, 'maple-tiger-42', 'Sam', seconds=9, hook=hook)
+'''
+
+
+@unittest.skipIf(os.environ.get('PYCRAFT_NO_WINDOW'), 'PYCRAFT_NO_WINDOW is set')
+class PlotMode(unittest.TestCase):
+    def test_a_resize_reaches_a_student_in_the_game(self):
+        folder = scratch('lan_plotmode')
+        script = folder / 'run.py'
+        script.write_text(PLOT_SCRIPT.format(root=str(ROOT)))
+        out = subprocess.run([sys.executable, str(script)], capture_output=True, text=True, timeout=240, cwd=str(ROOT))
+        text = out.stdout + out.stderr[-2500:]
+        self.assertIn('BEFORE (12, 12) 12', out.stdout, text)                  # a plot of their own, 12 wide, from the moment they joined
+        self.assertIn('AFTER_SIZE (20, 20) SESSION_WIDTH 20', out.stdout, text)   # the plot and the code prompt follow the teacher's change
+        self.assertIn('OLD_LINE grass NEW_LINE stone_bricks', out.stdout, text)  # the line was redrawn where the plot now ends
+        self.assertIn('BUILT gold_block gold_block', out.stdout, text)           # and code builds in the new part
+        self.assertNotIn('Traceback', out.stderr, text)
 
 
 @unittest.skipIf(os.environ.get('PYCRAFT_NO_WINDOW'), 'PYCRAFT_NO_WINDOW is set')

@@ -162,6 +162,8 @@ def open_window(path=None, parent=None):
     row('New players', lambda f: ttk.Combobox(f, textvariable=mode_var, values=('adventure', 'survival', 'creative', 'spectator'), state='readonly'))
     claim_var = tk.BooleanVar(value=state['setup'].self_claim)
     tk.Checkbutton(left, text='Students may /claim a free plot', variable=claim_var).pack(anchor='w')
+    auto_var = tk.BooleanVar(value=state['setup'].auto_claim)
+    tk.Checkbutton(left, text='Plot mode: everyone who joins gets a plot', variable=auto_var).pack(anchor='w')
     template_label = tk.Label(left, text='', anchor='w', fg='#555')
     template_label.pack(fill='x')
     status = tk.Label(left, text='', anchor='w', wraplength=240, justify='left', fg='#333')
@@ -176,7 +178,7 @@ def open_window(path=None, parent=None):
     def read_form():
         setup = state['setup']
         setup.name = name_var.get().strip() or 'My class'
-        setup.mode, setup.self_claim = mode_var.get(), claim_var.get()
+        setup.mode, setup.self_claim, setup.auto_claim = mode_var.get(), claim_var.get(), auto_var.get()
         setup.roster = clean_roster(roster_box.get('1.0', 'end'))
         return setup
 
@@ -187,6 +189,7 @@ def open_window(path=None, parent=None):
         roster_box.insert('1.0', '\n'.join(setup.roster))
         mode_var.set(setup.mode)
         claim_var.set(setup.self_claim)
+        auto_var.set(setup.auto_claim)
         template_label.configure(text=f'Starter build: {len(setup.template["blocks"])} blocks' if setup.template else 'Starter build: none')
         draw()
 
@@ -409,6 +412,17 @@ class Dashboard:
                                ('Lock building', 'lock'), ('Unlock', 'unlock'), ('Chat off', 'chat off'), ('Chat on', 'chat on'),
                                ('Freeze all', 'freeze all'), ('Unfreeze all', 'unfreeze all')):
             tk.Button(everyone, text=label, command=lambda c=command: self.run(c)).pack(side='left', padx=1)
+        sizes = tk.Frame(self.window)
+        sizes.pack(fill='x', padx=8, pady=2)
+        tk.Label(sizes, text='Plot size:').pack(side='left')
+        self.width_var, self.depth_var, self.clear_var = tk.StringVar(value='16'), tk.StringVar(value='16'), tk.BooleanVar(value=False)
+        tk.Spinbox(sizes, from_=4, to=128, width=5, textvariable=self.width_var).pack(side='left', padx=2)
+        tk.Label(sizes, text='x').pack(side='left')
+        tk.Spinbox(sizes, from_=4, to=128, width=5, textvariable=self.depth_var).pack(side='left', padx=2)
+        tk.Checkbutton(sizes, text='remove what is built if needed', variable=self.clear_var).pack(side='left', padx=4)
+        tk.Button(sizes, text='All plots this size', command=self.resize_all).pack(side='left', padx=2)
+        tk.Button(sizes, text="Selected student's plot", command=self.resize_selected).pack(side='left', padx=2)
+        tk.Button(sizes, text='Add a plot', command=lambda: self.run('addplot')).pack(side='left', padx=2)
         say = tk.Frame(self.window)
         say.pack(fill='x', padx=8, pady=4)
         self.say_var = tk.StringVar()
@@ -448,6 +462,17 @@ class Dashboard:
         subprocess.Popen([sys.executable, str(HERE / 'lan.py'), 'join', '127.0.0.1', self.server.code, '--name', 'Teacher', '--port', str(self.server.port)],
                          cwd=str(HERE), env=env)
         self.message.configure(text='Opening the game... you are a teacher in it (press P for the class panel).')
+
+    def resize_all(self):
+        self.run(f"plotsize {self.width_var.get()} {self.depth_var.get()}" + (' clear' if self.clear_var.get() else ''))
+
+    def resize_selected(self):
+        picked = self.table.selection()
+        plot = self.table.set(picked[0], 'plot') if picked else ''
+        if not str(plot).isdigit():
+            self.message.configure(text='Pick a student who has a plot first.')
+            return
+        self.run(f"resize {plot} {self.width_var.get()} {self.depth_var.get()}" + (' clear' if self.clear_var.get() else ''))
 
     def announce(self):
         text = self.say_var.get().strip()
