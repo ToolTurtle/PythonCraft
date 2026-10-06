@@ -1,0 +1,7 @@
+# What PythonCraft needs (Python 3.10 or newer). Tested with these versions; newer patch versions are fine.
+# Install:   python3 -m venv .venv && .venv/bin/pip install -r requirements.txt     (setup_linux.sh does this for you)
+ursina>=8.3,<9        # the game engine (it brings panda3d and pyperclip with it)
+numpy>=1.26           # the world's blocks
+pillow>=10.0          # pictures: textures, skins, the painter
+# Not installed by pip (they come with Python or your system):
+#   tkinter  - the launcher, painter and class tool windows (Linux: sudo apt install python3-tk)

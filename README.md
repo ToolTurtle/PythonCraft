@@ -98,6 +98,9 @@ Every command on one page: docs/COMMANDS.md (press / in a live-coding game to ty
 ## Playing together
 `python3 launcher.py` opens one window for everything. Classroom worlds on the local network: teachers use the class tool (`python3 classtool.py`) or `python3 lan.py host`, students use `python3 lan.py join`; anyone can be the teacher with `/teacher PIN`. `lan.py host --plot-mode` gives everyone who joins a plot in a flat world (the teacher can change the sizes). Plots, building with code, a teacher panel, rolling back changes, shared animals and more: see docs/README_lan.md. If something will not connect: `python3 doctor.py`.
 
+## Installing (Mac, Linux Mint)
+See docs/INSTALL.md. On Linux Mint: `./setup_linux.sh` then `./pythoncraft.sh`. The pictures and sounds (`assets/`) must be copied in by hand: they are not part of the shared code.
+
 ## Tests
 `python3 run_tests.py` runs the checks (add `-v` to see each one; `PYCRAFT_NO_WINDOW=1` skips the ones that open the game).
 They use a throwaway folder: your saves are never touched.

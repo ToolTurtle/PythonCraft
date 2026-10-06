@@ -7,9 +7,12 @@
 The usual reasons a class cannot connect: the computers are on different networks, the school network does not let computers talk to
 each other (ask your IT person), the firewall on the server's computer blocked Python (allow it when it asks), or the address is wrong.
 `listen` and `reach` show which it is."""
+import ctypes.util
 import importlib.util
 import os
 import platform
+import re
+import shutil
 import socket
 import subprocess
 import sys
@@ -31,15 +34,22 @@ def check_python():
     return [(OK, f'Python {version.major}.{version.minor}.{version.micro} ({platform.system()})', '')]
 
 
+def install_hint(package, apt=None):
+    """What to do about a missing package, in words that fit this computer."""
+    if platform.system() == 'Linux':
+        return 'Run ./setup_linux.sh (it installs what is needed)' + (f', or: sudo apt install {apt}' if apt else '') + '.'
+    return f'pip3 install {package}' if package else ''
+
+
 def check_packages():
     results = []
-    for module, name, needed, hint in (('ursina', 'ursina (the game engine)', True, 'pip3 install ursina'),
-                                       ('numpy', 'numpy', True, 'pip3 install numpy'),
-                                       ('PIL', 'pillow (pictures)', True, 'pip3 install pillow'),
-                                       ('pyperclip', 'pyperclip (copy and paste in text boxes)', False, 'pip3 install pyperclip'),
-                                       ('tkinter', 'tkinter (the launcher, painter and class tool windows)', False,
-                                        'On a Mac with Homebrew: brew install python-tk')):
+    for module, name, needed, package, apt in (('ursina', 'ursina (the game engine)', True, 'ursina', None),
+                                               ('numpy', 'numpy', True, 'numpy', None),
+                                               ('PIL', 'pillow (pictures)', True, 'pillow', None),
+                                               ('pyperclip', 'pyperclip (copy and paste in text boxes)', False, 'pyperclip', None),
+                                               ('tkinter', 'tkinter (the launcher, painter and class tool windows)', False, None, 'python3-tk')):
         if importlib.util.find_spec(module) is None:
+            hint = install_hint(package, apt) if platform.system() == 'Linux' or package else 'On a Mac with Homebrew: brew install python-tk'
             results.append((PROBLEM if needed else NOTE, f'{name} is missing.', hint))
         else:
             results.append((OK, f'{name} is installed.', ''))
@@ -146,11 +156,62 @@ def check_network():
     return results
 
 
+def _os_name():
+    try:
+        for line in Path('/etc/os-release').read_text().splitlines():
+            if line.startswith('PRETTY_NAME='):
+                return line.split('=', 1)[1].strip().strip('"')
+    except OSError:
+        pass
+    return 'Linux'
+
+
+def check_linux():
+    """Things that only matter on Linux: a screen, X11 or Wayland, graphics, sound, copy and paste, the firewall."""
+    if platform.system() != 'Linux':
+        return []
+    results = [(OK, _os_name(), '')]
+    if not (os.environ.get('DISPLAY') or os.environ.get('WAYLAND_DISPLAY')):
+        results.append((PROBLEM, 'No screen was found (DISPLAY is not set): the game needs a desktop session.',
+                        'Run it from the desktop of the computer, not over ssh or from a plain text login.'))
+    if os.environ.get('XDG_SESSION_TYPE', '').lower() == 'wayland':
+        results.append((NOTE, 'This is a Wayland session. If the mouse does not turn the camera or the window misbehaves, log out and choose an X11 session '
+                              '(Linux Mint Cinnamon uses X11 by default).', ''))
+    if not (shutil.which('xclip') or shutil.which('xsel') or shutil.which('wl-copy')):
+        results.append((NOTE, 'Copy and paste in the game\'s text boxes needs xclip.', 'sudo apt install xclip'))
+    if not ctypes.util.find_library('openal'):
+        results.append((NOTE, 'The sound library (OpenAL) is missing: the game will be silent.', 'sudo apt install libopenal1'))
+    glxinfo = shutil.which('glxinfo')
+    if glxinfo:
+        try:
+            text = subprocess.run([glxinfo, '-B'], capture_output=True, text=True, timeout=8).stdout
+            renderer = re.search(r'OpenGL renderer string:\s*(.+)', text)
+            version = re.search(r'OpenGL version string:\s*(\d+)\.(\d+)', text)
+            if version and (int(version.group(1)), int(version.group(2))) < (3, 1):
+                results.append((PROBLEM, f'The graphics only offer OpenGL {version.group(1)}.{version.group(2)}; the game needs 3.1 or newer.',
+                                'Install the graphics driver for this computer (Linux Mint: Menu > Driver Manager).'))
+            elif renderer and 'llvmpipe' in renderer.group(1).lower():
+                results.append((NOTE, f'The graphics are drawn by the processor ({renderer.group(1).strip()}): the game will be slow.',
+                                'On a virtual machine this is normal; on a real computer install the graphics driver (Menu > Driver Manager).'))
+            elif renderer:
+                results.append((OK, f'Graphics: {renderer.group(1).strip()}', ''))
+        except (OSError, subprocess.SubprocessError):
+            pass
+    else:
+        results.append((NOTE, 'The graphics were not checked (glxinfo is not installed).', 'sudo apt install mesa-utils'))
+    if shutil.which('ufw'):
+        results.append((NOTE, 'A firewall (ufw) may be on. A computer that hosts a class has to let players in:',
+                        f'sudo ufw allow {proto.DEFAULT_PORT}/tcp && sudo ufw allow {proto.DEFAULT_PORT + 1}/udp   (check with: sudo ufw status)'))
+    return results
+
+
 def run_all():
     results = []
     for title, check in (('This computer', check_python), ('Packages', check_packages), ('Pictures and sounds', check_assets), ('Mods', check_mods),
-                         ('Saved worlds', check_saves), ('Network', check_network)):
-        results.append((title, check()))
+                         ('Saved worlds', check_saves), ('Network', check_network), ('Linux', check_linux)):
+        found = check()
+        if found:                                                  # (a check that does not apply here, like the Linux one on a Mac, says nothing)
+            results.append((title, found))
     return results
 
 

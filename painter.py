@@ -189,6 +189,18 @@ def starting_picture(path, like=None, skin=None, size=16):
 
 # ---- the window -----------------------------------------------------------------------------------------------------------
 
+def bind_shortcuts(root, save, undo, redo):
+    """Ctrl+S, Ctrl+Z and Ctrl+Shift+Z (and Command on a Mac, a name that Linux and Windows do not know)."""
+    import tkinter as tk
+    for prefix in ('Control', 'Command'):
+        try:
+            root.bind(f'<{prefix}-s>', save)
+            root.bind(f'<{prefix}-z>', undo)
+            root.bind(f'<{prefix}-Z>', redo)
+        except tk.TclError:
+            pass
+
+
 def run(path, like=None, skin=None, size=16, close_after=None):
     import tkinter as tk
     from tkinter import colorchooser, messagebox
@@ -209,7 +221,7 @@ def run(path, like=None, skin=None, size=16, close_after=None):
     left.pack(side='left', padx=8, pady=8)
     canvas = tk.Canvas(left, width=width * zoom, height=height * zoom, highlightthickness=1, highlightbackground='#444', cursor='crosshair')
     canvas.pack()
-    status = tk.Label(left, text='', anchor='w', font=('Menlo', 11))
+    status = tk.Label(left, text='', anchor='w', font='TkFixedFont')
     status.pack(fill='x')
     right = tk.Frame(root)
     right.pack(side='left', padx=8, pady=8, anchor='n')
@@ -367,7 +379,7 @@ def run(path, like=None, skin=None, size=16, close_after=None):
             save()
         root.destroy()
 
-    tool_label = tk.Label(right, text='', font=('Menlo', 11), anchor='w')
+    tool_label = tk.Label(right, text='', font='TkFixedFont', anchor='w')
     tool_label.pack(fill='x')
     swatch = tk.Label(right, width=12, height=2, relief='sunken')
     swatch.pack(pady=2)
@@ -378,7 +390,7 @@ def run(path, like=None, skin=None, size=16, close_after=None):
                   command=lambda c=colour: set_color(hex_to_rgba(c))).grid(row=index // 8, column=index % 8, padx=1, pady=1)
     used = tk.Frame(right)
     used.pack(pady=(6, 0))
-    tk.Label(used, text='in this picture:', font=('Menlo', 10)).pack(anchor='w')
+    tk.Label(used, text='in this picture:', font='TkFixedFont').pack(anchor='w')
     used_row = tk.Frame(used)
     used_row.pack()
     for index, colour in enumerate(picture.common_colors(12)):
@@ -402,10 +414,7 @@ def run(path, like=None, skin=None, size=16, close_after=None):
         root.bind(key, lambda event, n=name: set_tool(n))
     root.bind('m', lambda event: toggle_mirror())
     root.bind('t', lambda event: toggle_tiles())
-    for prefix in ('Control', 'Command'):
-        root.bind(f'<{prefix}-s>', save)
-        root.bind(f'<{prefix}-z>', undo)
-        root.bind(f'<{prefix}-Z>', redo)
+    bind_shortcuts(root, save, undo, redo)
     root.protocol('WM_DELETE_WINDOW', close_asking)
     redraw()
     if close_after:                                             # (used for testing)
