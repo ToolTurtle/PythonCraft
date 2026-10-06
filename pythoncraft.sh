@@ -5,6 +5,7 @@
 #   ./pythoncraft.sh host [...]   start a class server           ./pythoncraft.sh join [...]   join a class
 #   ./pythoncraft.sh class        the teacher's class tool       ./pythoncraft.sh paint FILE.png
 #   ./pythoncraft.sh doctor       check the setup and the network     ./pythoncraft.sh test   run the tests
+#   ./pythoncraft.sh fetch        download the pictures and sounds (asks first)
 #   ./pythoncraft.sh SCRIPT.py [...]   any other script in this folder
 cd "$(dirname "$0")" || exit 1
 PY=python3
@@ -21,6 +22,7 @@ case "$what" in
   paint)    exec "$PY" painter.py "$@" ;;
   doctor)   exec "$PY" doctor.py "$@" ;;
   test)     exec "$PY" run_tests.py "$@" ;;
+  fetch)    exec "$PY" fetch_assets.py "$@" ;;
   *.py)     exec "$PY" "$what" "$@" ;;
-  *)        sed -n '2,9p' "$0" | sed 's/^# \{0,1\}//'; exit 2 ;;
+  *)        sed -n '2,10p' "$0" | sed 's/^# \{0,1\}//'; exit 2 ;;
 esac

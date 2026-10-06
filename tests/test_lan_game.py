@@ -206,6 +206,84 @@ lanplay.play('127.0.0.1', server.port, 'maple-tiger-42', 'Sam', seconds=9, hook=
 '''
 
 
+TYPED_SCRIPT = '''
+import sys, time
+sys.path.insert(0, {root!r})
+from classworld import ClassSetup
+from lanserver import LanServer
+
+setup = ClassSetup.for_roster('pm', [], 16, 16, 5, columns=2, extra=2, mode='survival', auto_claim=False)
+server = LanServer(setup.build_world(), pin='teach1', code='maple-tiger-42', host='127.0.0.1', port=0, default_mode='survival').start()
+
+def hook(game, client, remotes, chat):
+    import __main__
+    from ursina import invoke
+    c = game.console
+
+    def typed(text, delay):
+        def go():
+            if not c.is_open:
+                __main__.input('/')                                  # the / key opens the code prompt, as in live coding
+            c._set_text(text)
+            c.input('enter')
+        invoke(go, delay=delay)
+
+    print('READY', flush=True)
+    typed('fill 0 0 0 1 0 0 stone', 0.3)                             # (no plot yet: refused, with a helpful line)
+    def refused():
+        print('OPEN', c.is_open, 'REFUSED', any('need a plot' in l for l in c.lines), 'NOTHING', (0, 4, 0) not in server.world.changes, flush=True)
+    invoke(refused, delay=1.2)
+    typed('claim', 1.5)                                              # (a plain word: sent to the class as /claim)
+    def claimed():
+        print('CLAIMED', server.world.layout.owner_of('Sam') is not None, flush=True)
+    invoke(claimed, delay=3.0)
+    typed('fill 0 0 0 1 0 0 stone', 3.4)
+    def built():
+        print('BUILT', server.world.changes.get((0, 4, 0)), server.world.changes.get((1, 4, 0)), flush=True)
+        __main__.input('escape')
+        __main__.input('u')                                          # U undoes, as in live coding
+    invoke(built, delay=5.0)
+    def undone():
+        print('UNDONE', server.world.changes.get((0, 4, 0), ('never built',))[0], flush=True)
+    invoke(undone, delay=6.0)
+    def terminal():
+        print('TERMINAL', server.world.changes.get((5, 4, 5)), flush=True)
+    invoke(terminal, delay=8.5)
+
+import lanplay
+lanplay.play('127.0.0.1', server.port, 'maple-tiger-42', 'Sam', seconds=10, hook=hook)
+'''
+
+
+@unittest.skipIf(os.environ.get('PYCRAFT_NO_WINDOW'), 'PYCRAFT_NO_WINDOW is set')
+class TypingCode(unittest.TestCase):
+    def test_the_code_prompt_works_like_live_coding(self):
+        import time
+        folder = scratch('lan_typed')
+        script = folder / 'run.py'
+        script.write_text(TYPED_SCRIPT.format(root=str(ROOT)))
+        process = subprocess.Popen([sys.executable, str(script)], stdout=subprocess.PIPE, stderr=subprocess.PIPE, stdin=subprocess.PIPE, text=True, cwd=str(ROOT))
+        lines, started, wrote = [], time.time(), False
+        try:
+            for line in process.stdout:
+                lines.append(line)
+                if line.startswith('CLAIMED') and not wrote:
+                    process.stdin.write('placeblock 5 0 5 gold_block\n')              # the terminal is a code prompt too
+                    process.stdin.flush()
+                    wrote = True
+                if line.startswith('TERMINAL') or time.time() - started > 150:
+                    break
+        finally:
+            process.kill()
+            process.wait()
+        text = ''.join(lines)
+        self.assertIn('OPEN True REFUSED True NOTHING True', text, text[-800:])        # / opened the prompt; no plot: refused, nothing built
+        self.assertIn('CLAIMED True', text, text[-800:])                                # the plain word claim went to the class
+        self.assertIn("BUILT ('stone', None) ('stone', None)", text, text[-800:])     # code built in the plot
+        self.assertIn('UNDONE None', text, text[-800:])                                 # U took it back (and the server knows: air now)
+        self.assertIn("TERMINAL ('gold_block', None)", text, text[-800:])               # typing in the terminal built too
+
+
 @unittest.skipIf(os.environ.get('PYCRAFT_NO_WINDOW'), 'PYCRAFT_NO_WINDOW is set')
 class PlotMode(unittest.TestCase):
     def test_a_resize_reaches_a_student_in_the_game(self):

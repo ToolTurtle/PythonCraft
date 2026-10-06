@@ -75,10 +75,16 @@ or press *Join a class* in the launcher. In the game:
 
 | Key | Does |
 |---|---|
-| **T** | chat (**/** starts a chat command) |
-| **C** | the code prompt: type commands or Python, and they build **inside your plot** (see [COMMANDS.md](COMMANDS.md)) |
+| **/** (or **C**) | **the code prompt, just like live coding**: type commands or Python and they build in your plot (a world without plots: in a 48 x 48 space around where you stood when you joined). Enter runs it, a line ending in `:` goes on to the next line, Tab completes |
+| **U** / **Y** | undo / redo your last code (also the *Undo* and *Redo* buttons in the Esc menu), shared with everyone |
+| **T** | chat |
 | **P** | the teacher panel (teachers) |
 | **X** | stop following a student (teachers) |
+
+**The terminal you started the game from is a code prompt too**: type `fill 0 0 0 5 0 5 stone` there and it builds, exactly as in live coding.
+At the code prompt, a line starting with `/` goes to the class as a chat command (`/claim`, `/list`, `/mode creative all`), and so do plain words
+like `claim` or `mode creative all`. (`say`, `list`, `resize` and `tp` mean something in code, so those need the slash.) All of [COMMANDS.md](COMMANDS.md) works at the code
+prompt, including `:undo`, `:redo`, `:delay N` and `:help`.
 
 Type `/claim` to get a plot (if you do not have one yet), `/home` to go to it, `/plots` to see who has which. A name tag floats over each plot.
 You can build by hand only inside your own plot (in survival or creative mode; a teacher chooses). If you are missing a mod the teacher uses,

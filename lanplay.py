@@ -2,14 +2,16 @@
 
     python3 lan.py join 192.168.1.23 maple-tiger-42 --name Sam
 
-Keys:  T chat   / chat command   C code prompt (build in your plot with code)   P teacher panel (teachers)   X stop following
-Chat commands: /help lists them. /claim gets you a plot, /home goes to it, /teacher PIN makes you a teacher.
+Keys:  / (or C) the code prompt, as in live coding   U / Y undo and redo   T chat   P teacher panel (teachers)   X stop following
+The terminal you started this from is a code prompt too. A line starting with / at the code prompt goes to the class as a chat command.
+Chat commands (type them after T, or at the code prompt): /help lists them. /claim gets you a plot, /home goes to it, /teacher PIN makes you a teacher.
 
 What is shared: blocks (placed by hand or by code), where everybody is, chat, chests, and the world's own changes (water, falling sand,
 fire, redstone), which one player's computer works out for the whole class. Wild animals are not in a class world yet."""
 import math
 import sys
 import tempfile
+import threading
 import time
 from pathlib import Path
 
@@ -599,8 +601,13 @@ def play(host, port, code, name, screenshot=None, seconds=6, hook=None):
         def __getattr__(self, attribute):
             return getattr(state['session'].completer, attribute)
 
-    def make_session(plot_info):
-        if plot_info is None:
+    def make_session(plot_info, free=False):
+        """The code prompt's world: your plot, or (in a world with no plots) a space around where you stand, or nothing yet."""
+        if free:
+            p = game.player
+            width = depth = 48
+            origin = (math.floor(p.x) - 24, math.floor(p.y + 0.5), math.floor(p.z) - 24)           # (you are in the middle, at 24, 0, 24)
+        elif plot_info is None:
             width = depth = 8
             origin = (0, GROUND + 1, 0)
         else:
@@ -609,8 +616,16 @@ def play(host, port, code, name, screenshot=None, seconds=6, hook=None):
         plot = pycraft.plot(min(width, 256), CODE_HEIGHT, min(depth, 256))
         plot._game, plot._origin, plot._networked = game, origin, True
         plot._runtime.update(queue=[], closed=False, gallery=None, name=None, enter_state={}, timers={}, weather=None)
-        if plot_info is None:
-            plot._wrap_call = lambda function: game.message('You need a plot to build with code: type /claim in the chat.', 4)
+        if plot_info is None and not free:
+            told = {'at': 0.0}
+
+            def needs_a_plot(function):
+                game.message('You need a plot to build with code: type /claim in the chat.', 4)
+                if time.monotonic() - told['at'] > 2 and getattr(game, 'console', None) is not None:      # (once, not for every block)
+                    told['at'] = time.monotonic()
+                    game.console._add('You need a plot to build with code. Type  claim  to get one.')
+
+            plot._wrap_call = needs_a_plot
         else:
             plot._wrap_call = lambda function: run_captured(function, code=True)
         session = Session(plot, delay=2)
@@ -620,32 +635,64 @@ def play(host, port, code, name, screenshot=None, seconds=6, hook=None):
     def plot_key(plot_info):
         return (plot_info['id'], plot_info['x1'], plot_info['z1'], plot_info['x2'], plot_info['z2']) if plot_info else None
 
-    def switch_session(plot_info):
-        state['session'] = make_session(plot_info)
+    def switch_session(plot_info, free=False):
+        state['session'] = make_session(plot_info, free)
         state['code_plot'] = plot_info['id'] if plot_info else None
-        state['code_key'] = plot_key(plot_info)
+        state['code_key'] = ('free',) if free else plot_key(plot_info)
+        console = getattr(game, 'console', None)
+        if console is not None:
+            console._add('Your code now builds ' + (f"in plot {plot_info['id']}." if plot_info else 'around where you stand (w is a 48 x 48 space; you are at 24, 0, 24).'
+                                                   if free else 'nowhere yet: type /claim to get a plot.'))
+
+    # words that mean a chat command when typed at the code prompt (the ones that are also code, like say, list and resize, need the slash)
+    lan_words = ('claim', 'home', 'plots', 'teacher', 'mode', 'default', 'freeze', 'unfreeze', 'lock', 'unlock', 'mute', 'unmute', 'chat', 'kick',
+                 'bring', 'goto', 'history', 'assign', 'unassign', 'plotsize', 'addplot')
+    feed_lock = threading.Lock()
 
     def feed(line):
-        """What is typed in the code prompt (a teacher can also say `plot 3` to work in another plot)."""
-        text = line.strip()
-        if state['teacher'] and text.lower().startswith('plot ') and text[5:].strip().isdigit():
-            plot_info = next((p for p in state['layout'].to_json()['plots'] if p['id'] == int(text[5:])), None)
-            if plot_info is None:
-                print(f'There is no plot {text[5:].strip()}.')
-            else:
-                switch_session(plot_info)
-                print(f"Your code now builds in plot {plot_info['id']}.")
-            return
-        if text:
-            client.send_code(text[:200])
-        state['session'].feed(line)
+        """What is typed in the code prompt, here or in the terminal: code and :commands as in live coding; a line starting with / (or a word like
+        claim or mode) goes to the class as a chat command; a teacher can also say `plot 3` to work in another plot."""
+        with feed_lock:
+            text = line.strip()
+            if text.startswith('/') and len(text) > 1:
+                client.chat(text)
+                print('(sent to the class chat: the answer shows there)')
+                return
+            words = text.split()
+            session = state['session']
+            if words and words[0] in lan_words and not hasattr(session.plot, words[0]) and words[0] not in session.namespace \
+                    and not any(c in text for c in '(=') and not session.__dict__.get('_buffer'):
+                client.chat('/' + text)
+                print('(sent to the class chat: the answer shows there)')
+                return
+            if state['teacher'] and text.lower().startswith('plot ') and text[5:].strip().isdigit():
+                plot_info = next((p for p in state['layout'].to_json()['plots'] if p['id'] == int(text[5:])), None)
+                if plot_info is None:
+                    print(f'There is no plot {text[5:].strip()}.')
+                else:
+                    switch_session(plot_info)
+                    print(f"Your code now builds in plot {plot_info['id']}.")
+                return
+            if text:
+                client.send_code(text[:200])
+            session.feed(line)
+
+    def undo_code():
+        done = state['session'].undo()
+        game.message('Undone.' if done else 'Nothing to undo.', 2)
+
+    def redo_code():
+        done = state['session'].redo()
+        game.message('Redone.' if done else 'Nothing to redo.', 2)
 
     switch_session(None)
     game.console = GameConsole(game, feed, lambda: state['session'].more_prompt if state['session'].__dict__.get('_buffer')
                                else state['session'].prompt, Current(),
                                lambda: state['session'].completer.indent_for(state['session'].__dict__.get('_buffer')),
                                lambda text: state['session'].needs_more(text),
-                               title='Code  (builds in your plot. Enter runs, Tab completes, Shift+Enter new line, Esc closes)')
+                               title='Code  (Enter runs it, Tab completes, Shift+Enter new line, Esc closes)')
+    game.menu.add_buttons([('Undo', undo_code), ('Redo', redo_code)])             # (the same two buttons as in live coding)
+    game.console._add('Code: w is your plot. Try  fill 0 0 0 5 0 5 stone   (:help lists the commands, /claim gets a plot)')
 
     def draw_tags():
         from ursina import Text, destroy
@@ -661,6 +708,10 @@ def play(host, port, code, name, screenshot=None, seconds=6, hook=None):
     def set_plots(message):
         state['layout'] = Layout.from_json({'plots': message.get('plots', []), 'border': message.get('border'), 'spawn': None})
         draw_tags()
+        if not state['layout'].plots:                                    # (a world without plots: code builds around you)
+            if state.get('code_key') != ('free',):
+                switch_session(None, free=True)
+            return
         mine = state['layout'].owner_of(client.name)
         if state['teacher'] and state['code_plot'] is not None:           # (a teacher working in some plot: follow that plot if it changed)
             shown = next((q for q in state['layout'].to_json()['plots'] if q['id'] == state['code_plot']), None)
@@ -766,6 +817,27 @@ def play(host, port, code, name, screenshot=None, seconds=6, hook=None):
             if kind == 'closed':
                 state['gone'] = time.monotonic()
 
+    def terminal():
+        """The terminal you started the game from is a code prompt too, as in live coding."""
+        try:
+            state['session']._setup_readline()
+        except Exception:                                          # (no readline here: plain typing still works)
+            pass
+        if sys.stdin is not None and sys.stdin.isatty():
+            print('\nYou can type code here, or press / in the game window. w is your plot (or the space around you). :help lists the commands.\n')
+        while True:
+            session = state['session']
+            try:
+                line = input(session.more_prompt if session.__dict__.get('_buffer') else session.prompt)
+            except (EOFError, OSError, ValueError):
+                return
+            try:
+                feed(line)
+            except Exception as error:                              # (a mistake in what you typed must not end the prompt)
+                print(f'{type(error).__name__}: {error}')
+
+    threading.Thread(target=terminal, daemon=True).start()
+
     import __main__
 
     def tick(dt):
@@ -832,11 +904,14 @@ def play(host, port, code, name, screenshot=None, seconds=6, hook=None):
             if key == 't':
                 chat.open('', 't')
                 return
-            if key == '/':
-                chat.open('/', '/')
+            if key == '/' or (key == 'c' and state['session'] is not None):            # (the code prompt: / as in live coding, or C)
+                game.console.open(key)
                 return
-            if key == 'c' and state['session'] is not None:
-                game.console.open('c')
+            if key == 'u':
+                undo_code()
+                return
+            if key == 'y':
+                redo_code()
                 return
             if key == 'p' and state['teacher']:
                 panel.open()

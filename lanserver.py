@@ -584,6 +584,10 @@ class LanServer:
                 return 'Building is locked.'
             if conn.teacher:
                 return None
+            if not layout or not layout.plots:                          # (a world without plots, as in live coding: code builds near you)
+                if conn.pos is None or max(abs(pos[0] - conn.pos[0]), abs(pos[2] - conn.pos[2])) > 80 or abs(pos[1] - conn.pos[1]) > 80:
+                    return 'Code builds near where you are standing.'
+                return None
             if own is None:
                 return 'You need a plot to build with code: type /claim.'
             if not own.contains(pos[0], pos[2]):

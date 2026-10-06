@@ -416,3 +416,29 @@ class NotTheirFault(Base):
         for _ in range(12):
             ann.send({'t': 'mobs', 'c': 'not a list'})
         self.assertIsNotNone(wait_for(ann, 'closed', timeout=3))
+
+
+class CodeInAWorldWithoutPlots(Base):
+    """As in live coding: with no plots, code builds around you."""
+
+    def test_code_builds_near_you_but_not_far_away(self):
+        ann = self.join('Ann', at=(100.0, 70.0, 100.0))                               # (adventure mode: code is allowed anyway)
+        ann.send_blocks([(120, 70, 90, 'bricks', None, None, None)], code=True)
+        self.assertIsNone(wait_for(ann, 'reject', timeout=0.4))
+        self.assertEqual(self.server.world.changes[(120, 70, 90)], ('bricks', None))
+        ann.send_blocks([(400, 70, 100, 'bricks', None, None, None)], code=True)
+        self.assertIn('near where you are', wait_for(ann, 'reject')['why'])
+
+    def test_a_teacher_can_still_turn_code_off_or_lock_building(self):
+        teacher, ann = self.join('Tea', teacher=True), self.join('Ann')
+        self.say(teacher, '/code off Ann')
+        ann.send_blocks([(1, 70, 1, 'bricks', None, None, None)], code=True)
+        self.assertIn('turned off', wait_for(ann, 'reject')['why'])
+        self.say(teacher, '/code on Ann')
+        self.say(teacher, '/lock')
+        ann.send_blocks([(1, 70, 1, 'bricks', None, None, None)], code=True)
+        self.assertIn('locked', wait_for(ann, 'reject')['why'])
+        self.say(teacher, '/unlock')
+        self.say(teacher, '/freeze Ann')
+        ann.send_blocks([(1, 70, 1, 'bricks', None, None, None)], code=True)
+        self.assertIn('frozen', wait_for(ann, 'reject')['why'])

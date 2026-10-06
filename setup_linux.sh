@@ -5,6 +5,8 @@
 #   ./setup_linux.sh --yes         do not ask
 #   ./setup_linux.sh --no-apt      skip the system packages (you installed python3-venv, python3-tk, xclip, libopenal1 yourself)
 #   ./setup_linux.sh --desktop     also put a PythonCraft icon in your applications menu
+#   ./setup_linux.sh --assets      also download Minecraft's pictures and sounds (assets/) with fetch_assets.py, without asking
+#   ./setup_linux.sh --no-assets   do not offer to download them
 #   ./setup_linux.sh --wheels DIR  install the Python packages from a folder of downloaded files (no internet needed; see docs/INSTALL.md)
 #   ./setup_linux.sh --dry-run     only say what would be done
 #
@@ -12,7 +14,7 @@
 set -euo pipefail
 cd "$(dirname "$0")"
 
-YES=0; APT=1; DESKTOP=0; DRY=0; WHEELS=""
+YES=0; APT=1; DESKTOP=0; DRY=0; WHEELS=""; ASSETS=""
 while [ $# -gt 0 ]; do
   arg="$1"; shift
   case "$arg" in
@@ -20,8 +22,10 @@ while [ $# -gt 0 ]; do
     --no-apt) APT=0 ;;
     --desktop) DESKTOP=1 ;;
     --dry-run) DRY=1 ;;
+    --assets) ASSETS=1 ;;
+    --no-assets) ASSETS=0 ;;
     --wheels) [ $# -gt 0 ] || { echo "--wheels needs a folder"; exit 2; }; WHEELS="$1"; shift ;;
-    -h|--help) sed -n '2,11p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+    -h|--help) sed -n '2,13p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
     *) echo "I do not know the option $arg (try --help)"; exit 2 ;;
   esac
 done
@@ -70,11 +74,21 @@ else
 fi
 
 say "4. The pictures and sounds (assets/)"
-if [ -d assets/textures ] && [ -n "$(ls -A assets/textures 2>/dev/null)" ]; then
+if [ -d assets/textures ] && ls assets/textures/*.png >/dev/null 2>&1; then
   echo "   found"
 else
-  echo "   MISSING: the folder assets/ is not part of the shared code (it comes from Minecraft)."
-  echo "   Copy the whole assets folder from a computer where PythonCraft works, into $(pwd)/assets"
+  echo "   Not here yet. They are Minecraft's own pictures and sounds (Mojang Studios / Microsoft), not part of this project's code."
+  echo "   fetch_assets.py can download them from a public mirror (about 6 MB, 500 small files) for use on this computer only."
+  if [ "$ASSETS" = "" ] && [ "$YES" = 0 ] && [ "$DRY" = 0 ]; then
+    read -r -p "   Download them now? [y/N] " answer
+    case "${answer:-n}" in [Yy]*) ASSETS=1 ;; *) ASSETS=0 ;; esac
+  fi
+  if [ "$ASSETS" = 1 ]; then
+    run .venv/bin/python fetch_assets.py --yes
+  else
+    echo "   skipped. Get them later with  ./pythoncraft.sh fetch  (or ./setup_linux.sh --assets),"
+    echo "   or copy the whole assets folder from a computer where PythonCraft works into $(pwd)/assets"
+  fi
 fi
 
 if [ "$DESKTOP" = 1 ]; then

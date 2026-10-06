@@ -56,19 +56,32 @@ def check_packages():
     return results
 
 
+FETCH_HINT = ('Run  python3 fetch_assets.py  (it asks first, then downloads them from a public mirror), '
+              'or copy the whole assets folder from a computer where PythonCraft works.')
+
+
 def check_assets():
     textures, sounds = HERE / 'assets' / 'textures', HERE / 'assets' / 'sounds'
     pictures = len(list(textures.glob('*.png'))) if textures.is_dir() else 0
     if pictures < 50:
-        return [(PROBLEM, f'The pictures in assets/textures are missing ({pictures} found).',
-                 'The folder assets/ is not part of the shared code (it comes from Minecraft). Copy the whole assets folder from a computer that works.')]
+        return [(PROBLEM, f'The pictures in assets/textures are missing ({pictures} found). They come from Minecraft and are not part of the shared code.', FETCH_HINT)]
     results = [(OK, f'{pictures} block pictures found.', '')]
     if not (HERE / 'assets' / 'textures' / 'entity' / 'zombie.png').exists():
-        results.append((PROBLEM, 'The creature pictures (assets/textures/entity) are missing.', 'Copy the whole assets folder from a computer that works.'))
+        results.append((PROBLEM, 'The creature pictures (assets/textures/entity) are missing.', FETCH_HINT))
     if not sounds.is_dir() or not any(sounds.iterdir()):
-        results.append((NOTE, 'There are no sounds in assets/sounds: the game will be silent.', ''))
+        results.append((NOTE, 'There are no sounds in assets/sounds: the game will be silent.', FETCH_HINT))
+    if not (HERE / 'assets' / 'blank_cursor.png').exists():
+        results.append((NOTE, 'assets/blank_cursor.png is missing (the mouse pointer may show while you play).', 'git checkout assets/blank_cursor.png'))
     if not list((HERE / 'assets' / 'textures' / 'entity').glob('player_*.png')):
-        results.append((NOTE, 'No player skins (assets/textures/entity/player_*.png): other players in a class will look like zombies.', ''))
+        results.append((NOTE, 'No player skins (assets/textures/entity/player_*.png): other players in a class will look like zombies.', FETCH_HINT))
+    try:
+        import fetch_assets
+        manifest = fetch_assets.load_manifest()
+        gone = [name for name in manifest['files'] if not (HERE / 'assets' / name).exists()]
+        if gone and pictures >= 50:
+            results.append((NOTE, f'{len(gone)} of the {len(manifest["files"])} pictures and sounds the game uses are missing (the game uses flat colours or silence for them).', FETCH_HINT))
+    except Exception:                                              # (the manifest is a nicety here)
+        pass
     return results
 
 

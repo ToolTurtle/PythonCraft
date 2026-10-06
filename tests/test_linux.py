@@ -32,10 +32,26 @@ class Scripts(unittest.TestCase):
         for bad_args in (['--nonsense'], ['--wheels']):
             self.assertEqual(subprocess.run([str(ROOT / 'setup_linux.sh')] + bad_args, capture_output=True, text=True).returncode, 2)
 
+    def test_the_pictures_are_never_downloaded_without_being_asked(self):
+        import shutil
+        folder = tests.scratch('setup_copy')                                       # (a copy of the script in a folder that has no assets/)
+        for name in ('setup_linux.sh', 'requirements.txt', 'fetch_assets.py'):
+            shutil.copy(ROOT / name, folder / name)
+
+        def setup(*flags):
+            return subprocess.run([str(folder / 'setup_linux.sh'), '--dry-run', '--no-apt', *flags], capture_output=True, text=True, timeout=60).stdout
+        for flags in ((), ('--yes',), ('--no-assets',), ('--yes', '--no-assets')):
+            out = setup(*flags)
+            self.assertIn('Mojang', out)                                           # (it says whose they are)
+            self.assertIn('skipped', out)
+            self.assertNotIn('would run: .venv/bin/python fetch_assets.py', out, flags)   # (--yes is not consent to download them)
+        self.assertIn('would run: .venv/bin/python fetch_assets.py --yes', setup('--assets'))
+        self.assertIn('found', subprocess.run([str(ROOT / 'setup_linux.sh'), '--dry-run', '--no-apt'], capture_output=True, text=True, timeout=60).stdout)
+
     def test_the_launcher_script_knows_its_words(self):
         text = (ROOT / 'pythoncraft.sh').read_text()
         for word, script in (('play', 'main.py'), ('live', 'livecode.py'), ('host', 'lan.py host'), ('join', 'lan.py join'), ('class', 'classtool.py'),
-                             ('doctor', 'doctor.py'), ('paint', 'painter.py'), ('test', 'run_tests.py')):
+                             ('doctor', 'doctor.py'), ('paint', 'painter.py'), ('test', 'run_tests.py'), ('fetch', 'fetch_assets.py')):
             self.assertRegex(text, rf'{word}\)\s+exec "\$PY" {re.escape(script)}')
         out = subprocess.run([str(ROOT / 'pythoncraft.sh'), 'doctor'], capture_output=True, text=True, timeout=120)
         self.assertIn('This computer', out.stdout)                                  # (it really runs doctor.py)
@@ -124,6 +140,12 @@ class DoctorOnLinux(unittest.TestCase):
         text = ' '.join(r[2] for r in results)
         self.assertIn('ufw allow 25570/tcp', text)
         self.assertIn('ufw allow 25571/udp', text)
+
+    def test_missing_pictures_point_to_the_downloader(self):
+        with mock.patch.object(doctor, 'HERE', tests.scratch('doctor_no_assets')):
+            results = doctor.check_assets()
+        self.assertEqual(results[0][0], doctor.PROBLEM)
+        self.assertIn('fetch_assets.py', results[0][2])
 
     def test_install_hints_fit_the_computer(self):
         with mock.patch('doctor.platform.system', return_value='Linux'):

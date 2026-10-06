@@ -8,3 +8,7 @@ It does NOT cover the folder assets/ (block and creature pictures, sounds), whic
 Minecraft and belongs to Mojang Studios / Microsoft. It is left out of the git repository on purpose.
 To run the game you need your own copy of those files in assets/ (taken from a copy of the game you own);
 do not publish or redistribute them. Pictures and files that you make yourself for mods are yours.
+
+fetch_assets.py can download those files for you from a public third-party mirror of Minecraft's resources (github.com/InventivetalentDev/minecraft-assets). That
+is a convenience: this project does not host or license them, and whether you may use them is between you and Mojang/Microsoft (see their usage
+guidelines). The script always asks first, fetches only the files the game uses, and keeps them in assets/ on that one computer.

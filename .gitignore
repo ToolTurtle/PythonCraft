@@ -15,8 +15,13 @@ __pycache__/
 mods/.cache/
 *.tmp
 
-# Minecraft's own pictures and sounds belong to Mojang/Microsoft: not ours to share (see NOTICE)
-assets/
+# Minecraft's own pictures and sounds belong to Mojang/Microsoft: not ours to share (see NOTICE). They are fetched by fetch_assets.py.
+# (assets/blank_cursor.png and assets/textures/README.md are ours and are kept.)
+assets/*
+!assets/blank_cursor.png
+!assets/textures
+assets/textures/*
+!assets/textures/README.md
 minecraft-assets-*/
 
 
